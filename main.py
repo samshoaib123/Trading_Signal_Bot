@@ -17,6 +17,7 @@ Usage::
     python main.py --once          # single scan, useful for cron or a smoke test
     python main.py --dry-run       # scan and log messages without sending them
     python main.py --test-telegram # verify the token / chat id wiring
+    python main.py --preflight     # check everything at once before deploying
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from config import ConfigError, Settings, configure_logging, load_settings
 from exchange import ExchangeError, create_exchange, fetch_ohlcv, load_valid_symbols
 from indicators import calculate_indicators, resolve_backend
 from notifier import TelegramNotifier
+from preflight import run_preflight
 from state import load_state, prune_state, record_signal, save_state, should_send
 from strategies import Signal, detect_signals
 
@@ -177,6 +179,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="log Telegram messages instead of sending them")
     parser.add_argument("--test-telegram", action="store_true",
                         help="send a test message and exit")
+    parser.add_argument("--preflight", action="store_true",
+                        help="check config, exchange, data, state and Telegram, "
+                             "then print a report and exit")
     return parser.parse_args(argv)
 
 
@@ -186,6 +191,9 @@ def main(argv=None) -> int:
     configure_logging(settings.log_level)
 
     LOG.info("Crypto Trading Signal Bot starting up")
+
+    if args.preflight:
+        return run_preflight(settings, TelegramNotifier(settings, dry_run=args.dry_run))
 
     if not args.dry_run:
         try:

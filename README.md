@@ -189,8 +189,8 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env and set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 
-python main.py --test-telegram     # 1. confirm Telegram is wired up
-python main.py --once --dry-run    # 2. one scan, messages logged not sent
+python main.py --preflight         # 1. check EVERYTHING at once (see below)
+python main.py --once --dry-run    # 2. one real scan, messages logged not sent
 python main.py                     # 3. run for real
 ```
 
@@ -202,8 +202,37 @@ python main.py                     # 3. run for real
 | `--once` | Single scan then exit — handy for cron or a smoke test |
 | `--dry-run` | Scan normally but log Telegram messages instead of sending |
 | `--test-telegram` | Send one test message and exit |
+| `--preflight` | Check config, exchange, candles, indicators, state file and Telegram, print a report, exit |
 
-Exit codes: `0` success, `1` Telegram test failed, `2` configuration error.
+Exit codes: `0` success, `1` a check failed, `2` configuration error.
+
+### `--preflight`
+
+The single command to run before (and after) deploying. It walks every
+dependency in order and tells you exactly what to fix:
+
+```
+========================================================================
+PREFLIGHT REPORT
+========================================================================
+✅ Configuration      10 symbols, 15m, risk 1.0% of 1,000
+✅ Exchange markets   binance reachable, 9 tradable symbol(s)
+✅ Candle download    299 closed 15m candles for BTC/USDT, last close 64980.5
+✅ Indicators         pandas backend | RSI 46.2 | ATR 121.4 | trend EMA200
+✅ State file         signal_state.json writable (new file)
+✅ Telegram delivery  test message sent
+========================================================================
+All checks passed. You are ready to deploy: python main.py
+========================================================================
+```
+
+Failures print a `->` line with the fix. Checks are independent, so one run
+reports every problem rather than only the first. Exit code is `0` only when
+nothing failed, which makes it usable in a deploy script.
+
+It deliberately calls `load_markets()` itself instead of reusing the bot's
+degrade-gracefully symbol loader — otherwise an unreachable exchange would be
+reported as healthy.
 
 ---
 
@@ -259,6 +288,11 @@ Railway's free tier is enough for this bot (it is idle 99% of the time).
    `Crypto Trading Signal Bot starting up`, the pair list, and a Telegram
    startup message in your chat.
 
+   If nothing arrives, temporarily set the start command to
+   `python main.py --preflight` (**Settings → Deploy → Custom Start Command**),
+   redeploy, and read the report in the logs — it names the exact problem.
+   Change it back to `python main.py` afterwards.
+
 > **If you see HTTP 451 in the logs**, Railway's region is geo-blocked by
 > `binance.com`. Set `EXCHANGE_ID=binanceus`, `kucoin`, `okx` or `bybit` — the
 > bot is exchange-agnostic through ccxt. See
@@ -305,7 +339,7 @@ sudo -u botuser nano .env
 sudo chmod 600 .env
 
 # 6. Smoke test before installing the service
-sudo -u botuser .venv/bin/python main.py --test-telegram
+sudo -u botuser .venv/bin/python main.py --preflight
 sudo -u botuser .venv/bin/python main.py --once --dry-run
 
 # 7. Install and start the service
@@ -451,8 +485,10 @@ indicators.py      RSI / MACD / Bollinger / ATR / EMA / SMA (+ pandas-ta backend
 strategies.py      Setup detection, ATR levels, confidence scoring, sizing
 notifier.py        Telegram HTML formatting and delivery with retries
 state.py           Atomic JSON state, deduplication rules, pruning
-tests/             100 unit and pipeline tests (no network required)
+preflight.py       --preflight self-check with actionable failure hints
+tests/             110 unit and pipeline tests (no network required)
 deploy/            systemd unit file
+.github/workflows/ CI: tests on Python 3.11 and 3.12
 Dockerfile         Python 3.12 slim image, non-root
 docker-compose.yml Compose service with a persistent state volume
 railway.json       Railway build/deploy configuration
@@ -471,7 +507,7 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-100 tests, no network needed. They cover indicator maths against hand-computed
+110 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt
