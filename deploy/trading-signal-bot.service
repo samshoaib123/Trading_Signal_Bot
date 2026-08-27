@@ -1,0 +1,42 @@
+# Ubuntu / systemd unit for the crypto signal bot.
+#
+#   sudo cp deploy/trading-signal-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trading-signal-bot
+#   journalctl -u trading-signal-bot -f
+#
+# Adjust User/WorkingDirectory if you cloned somewhere else.
+
+[Unit]
+Description=Crypto Trading Signal Bot (Binance 15m -> Telegram)
+Documentation=https://github.com/samshoaib123/Trading_Signal_Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/trading-signal-bot
+EnvironmentFile=/opt/trading-signal-bot/.env
+ExecStart=/opt/trading-signal-bot/.venv/bin/python /opt/trading-signal-bot/main.py
+
+# Restart forever on any exit, but back off so a bad config does not spin the CPU.
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=0
+
+# Log to the journal (the bot already writes structured lines to stdout).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=signal-bot
+
+# Basic hardening — the bot only needs outbound HTTPS and its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/trading-signal-bot
+
+[Install]
+WantedBy=multi-user.target

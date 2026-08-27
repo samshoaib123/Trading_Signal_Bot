@@ -1,0 +1,10 @@
+# Optional: use pandas-ta instead of the built-in pandas indicator backend.
+#
+#   pip install -r requirements-optional.txt
+#   export INDICATOR_BACKEND=pandas_ta
+#
+# Heads-up: PyPI now only publishes pandas-ta wheels for Python >= 3.12, and the
+# old 0.3.14b0 release is gone. On Python 3.11 or older this install will fail —
+# that is exactly why the bot ships its own pandas-only implementations and does
+# NOT require this file. Outputs match to floating-point noise either way.
+pandas-ta==0.4.71b0 ; python_version >= "3.12"
