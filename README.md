@@ -4,6 +4,8 @@ A production-ready signal bot that watches Binance 15-minute candles for three
 classic technical setups and pushes alerts to Telegram — with ATR-based stop
 loss / take profit, a 1–3 confidence score, and a suggested position size.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/claude/crypto-trading-signal-bot-xmcatj/notebooks/colab_quickstart.ipynb)
+
 **It never places an order and never needs an exchange API key.** Public ccxt
 endpoints only.
 
@@ -33,6 +35,7 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 - [Confidence score](#confidence-score)
 - [Deduplication](#deduplication)
 - [Quick start (local)](#quick-start-local)
+- [Try it in Google Colab](#try-it-in-google-colab)
 - [Getting your Telegram token and chat id](#getting-your-telegram-token-and-chat-id)
 - [Deploy on Railway](#deploy-on-railway)
 - [Deploy on an Ubuntu VPS (systemd)](#deploy-on-an-ubuntu-vps-systemd)
@@ -233,6 +236,37 @@ nothing failed, which makes it usable in a deploy script.
 It deliberately calls `load_markets()` itself instead of reusing the bot's
 degrade-gracefully symbol loader — otherwise an unreachable exchange would be
 reported as healthy.
+
+---
+
+## Try it in Google Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/claude/crypto-trading-signal-bot-xmcatj/notebooks/colab_quickstart.ipynb)
+
+`notebooks/colab_quickstart.ipynb` clones the repo, installs the dependencies,
+takes your Telegram credentials via `getpass` (so the token never lands in saved
+notebook output), runs `--preflight`, and lets you inspect raw indicator values
+for any pair.
+
+**Colab is a testing tool here, not a host.** Use it to confirm the setup works,
+see what alerts look like and tune thresholds. It cannot run the bot 24/7:
+
+| Limit | Effect |
+|---|---|
+| Disconnects after ~90 min idle, ~12 h max | The bot stops; alerts stop |
+| Browser tab must stay open | Close the laptop, lose the bot |
+| Runtime resets wipe the filesystem | `signal_state.json` is lost, so you get duplicate alerts next run |
+
+### Expect a Binance 451 in Colab
+
+Colab runs on Google infrastructure in the US, and `binance.com` blocks US IP
+addresses. Preflight will report it clearly. The fix is one line in the notebook:
+
+```python
+os.environ['EXCHANGE_ID'] = 'kucoin'   # or okx, bybit, binanceus
+```
+
+Everything else behaves identically — the bot is exchange-agnostic through ccxt.
 
 ---
 
@@ -487,6 +521,7 @@ notifier.py        Telegram HTML formatting and delivery with retries
 state.py           Atomic JSON state, deduplication rules, pruning
 preflight.py       --preflight self-check with actionable failure hints
 tests/             110 unit and pipeline tests (no network required)
+notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI: tests on Python 3.11 and 3.12
 Dockerfile         Python 3.12 slim image, non-root
