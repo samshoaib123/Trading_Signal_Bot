@@ -4,7 +4,7 @@ A production-ready signal bot that watches Binance 15-minute candles for three
 classic technical setups and pushes alerts to Telegram — with ATR-based stop
 loss / take profit, a 1–3 confidence score, and a suggested position size.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/claude/crypto-trading-signal-bot-xmcatj/notebooks/colab_quickstart.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/main/notebooks/colab_quickstart.ipynb)
 
 **It never places an order and never needs an exchange API key.** Public ccxt
 endpoints only.
@@ -241,12 +241,34 @@ reported as healthy.
 
 ## Try it in Google Colab
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/claude/crypto-trading-signal-bot-xmcatj/notebooks/colab_quickstart.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/main/notebooks/colab_quickstart.ipynb)
 
 `notebooks/colab_quickstart.ipynb` clones the repo, installs the dependencies,
 takes your Telegram credentials via `getpass` (so the token never lands in saved
 notebook output), runs `--preflight`, and lets you inspect raw indicator values
 for any pair.
+
+### The badge needs two things first
+
+The badge above resolves to `blob/main/...` on a **public** repo. Two conditions
+have to hold or Colab answers *"Notebook not found"*:
+
+1. **The repo must be public.** Colab cannot read a private repo from a plain
+   link. Nothing in this repository is secret — `.env` is gitignored and has
+   never been committed, and credentials are read from environment variables at
+   runtime — so making it public is safe. As a bonus, GitHub Actions minutes
+   become free and unlimited on public repos.
+2. **The notebook must be on `main`.** A branch name containing a slash (like
+   `claude/crypto-trading-signal-bot-xmcatj`) breaks Colab's
+   `blob/<branch>/<path>` URL: it cannot tell where the branch name ends and the
+   file path begins. Merging the branch into `main` fixes it.
+
+**Keeping the repo private?** Then skip the badge and load the notebook through
+Colab's own GitHub integration: *File -> Open notebook -> GitHub tab -> tick
+"Include private repositories" -> authorize*. The first cell will also ask for a
+GitHub token so it can clone; a fine-grained token with **Contents: Read-only**
+is enough. The cell reads it with `getpass`, scrubs it from any error message,
+and strips it from the git remote after cloning.
 
 **Colab is a testing tool here, not a host.** Use it to confirm the setup works,
 see what alerts look like and tune thresholds. It cannot run the bot 24/7:
