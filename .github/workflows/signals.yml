@@ -1,0 +1,87 @@
+# Run the signal bot on a schedule, with no server at all.
+#
+# This is the free hosting option: GitHub runs the scan every 15 minutes and the
+# bot exits immediately after. Read .github/workflows/README.md before enabling
+# it - there are three real caveats (default branch only, delayed schedules, and
+# public-repo minutes).
+name: signals
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub often runs this LATE (5-20 min under load) and can
+    # skip runs entirely at peak times. The bot only ever evaluates the last
+    # CLOSED candle and de-duplicates by candle timestamp, so a late run is
+    # harmless - it just means the alert reaches you late, or not at all if the
+    # delay skipped a whole candle.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        default: scan
+        options: [scan, preflight, dry-run]
+
+# Never let a slow run overlap the next scheduled one.
+concurrency:
+  group: signals
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # GitHub runners sit in US datacentres and binance.com blocks US IPs, so
+      # this defaults to an exchange that is reachable from there. Override it
+      # without touching this file: Settings -> Secrets and variables -> Actions
+      # -> Variables -> new variable EXCHANGE_ID.
+      EXCHANGE_ID: ${{ vars.EXCHANGE_ID || 'kucoin' }}
+      SYMBOLS: ${{ vars.SYMBOLS }}
+      CAPITAL: ${{ vars.CAPITAL }}
+      RISK_PERCENT: ${{ vars.RISK_PERCENT }}
+      MIN_CONFIDENCE: ${{ vars.MIN_CONFIDENCE }}
+      SIGNAL_COOLDOWN_MINUTES: ${{ vars.SIGNAL_COOLDOWN_MINUTES }}
+      STATE_FILE: signal_state.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+
+      # Restore the de-duplication state written by the previous run. Cache keys
+      # are immutable, so each run saves under a fresh key and restores the most
+      # recent one by prefix.
+      - name: Restore signal state
+        uses: actions/cache/restore@v4
+        with:
+          path: signal_state.json
+          key: signal-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            signal-state-
+
+      - name: Run
+        run: |
+          case "${{ inputs.mode || 'scan' }}" in
+            preflight) python main.py --preflight ;;
+            dry-run)   python main.py --once --dry-run ;;
+            *)         python main.py --once ;;
+          esac
+
+      # always() so a failed scan still persists whatever state it did record,
+      # which keeps the next run from re-alerting on candles already sent.
+      - name: Save signal state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: signal_state.json
+          key: signal-state-${{ github.run_id }}-${{ github.run_attempt }}

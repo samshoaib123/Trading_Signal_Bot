@@ -37,6 +37,7 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 - [Quick start (local)](#quick-start-local)
 - [Try it in Google Colab](#try-it-in-google-colab)
 - [Getting your Telegram token and chat id](#getting-your-telegram-token-and-chat-id)
+- [Deploy free on GitHub Actions](#deploy-free-on-github-actions)
 - [Deploy on Railway](#deploy-on-railway)
 - [Deploy on an Ubuntu VPS (systemd)](#deploy-on-an-ubuntu-vps-systemd)
 - [Deploy with Docker / docker-compose](#deploy-with-docker--docker-compose)
@@ -308,6 +309,46 @@ Everything else behaves identically — the bot is exchange-agnostic through ccx
 
 ---
 
+## Deploy free on GitHub Actions
+
+`.github/workflows/signals.yml` runs `python main.py --once` every 15 minutes on
+GitHub's runners. No server, and on a public repository no cost. Full setup and
+caveats: [`.github/workflows/README.md`](.github/workflows/README.md).
+
+Three conditions have to hold:
+
+1. **Public repository** — Actions minutes are unlimited on public repos. The
+   private free allowance is 2,000 minutes/month and this needs about 2,900
+   (~96 runs/day, ~1 minute each, most of it cold-start `pip install`).
+2. **Workflow on the default branch** — GitHub runs scheduled workflows *only*
+   from the default branch. Elsewhere the cron is silently ignored.
+3. **`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as repository secrets** —
+   *Settings → Secrets and variables → Actions*.
+
+Then run it manually once to check the wiring: *Actions → signals → Run workflow
+→ mode `preflight`*.
+
+State survives between runs through the Actions cache: each run restores
+`signal_state.json` from the most recent entry and saves a new one under a fresh
+key (cache keys are immutable). A cache miss costs at most one duplicate alert.
+
+### What you are trading away
+
+GitHub's cron is best-effort: runs are commonly 5–20 minutes late under load and
+are sometimes skipped. The bot always evaluates the last *closed* candle and
+de-duplicates by candle timestamp, so a late run gives you a late alert rather
+than a wrong one — but a delay long enough to skip a candle means that candle's
+signal never arrives at all. Scheduled workflows are also disabled after 60 days
+without repository activity.
+
+For alerts that land on time, every time, use Railway or a VPS.
+
+> **Binance will not work here.** GitHub runners are in US datacentres and
+> `binance.com` blocks US IPs, so the workflow defaults to `EXCHANGE_ID=kucoin`.
+> Change it with an Actions *variable*, not by editing the workflow.
+
+---
+
 ## Deploy on Railway
 
 Railway's free tier is enough for this bot (it is idle 99% of the time).
@@ -545,7 +586,7 @@ preflight.py       --preflight self-check with actionable failure hints
 tests/             110 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
-.github/workflows/ CI: tests on Python 3.11 and 3.12
+.github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
 Dockerfile         Python 3.12 slim image, non-root
 docker-compose.yml Compose service with a persistent state volume
 railway.json       Railway build/deploy configuration
