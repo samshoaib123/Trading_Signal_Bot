@@ -31,4 +31,10 @@ HEALTHCHECK --interval=5m --timeout=10s --start-period=3m --retries=2 \
     CMD python -c "import os,sys,time; f=os.environ['HEARTBEAT_FILE']; \
 sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 1860 else 1)"
 
+EXPOSE 8000
+
+# Default: Telegram alerts only.
+# For the web dashboard instead, override the command and set
+# RUN_BOT_IN_WEBAPP=true so one container serves the page AND scans:
+#   docker run -e RUN_BOT_IN_WEBAPP=true -p 8000:8000 <image> python webserver.py
 CMD ["python", "main.py"]

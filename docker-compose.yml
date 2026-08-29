@@ -10,6 +10,7 @@ services:
       # Keep state on a named volume so restarts do not replay old signals.
       STATE_FILE: /app/data/signal_state.json
       HEARTBEAT_FILE: /app/data/heartbeat
+      TRACKER_FILE: /app/data/signal_outcomes.json
       TZ: UTC
     volumes:
       - signal-state:/app/data

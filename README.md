@@ -33,6 +33,7 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 - [The three setups](#the-three-setups)
 - [Does it actually work? Backtest it](#does-it-actually-work-backtest-it)
 - [Outcome tracking](#outcome-tracking)
+- [Web dashboard](#web-dashboard)
 - [Risk levels and position sizing](#risk-levels-and-position-sizing)
 - [Confidence score](#confidence-score)
 - [Deduplication](#deduplication)
@@ -160,6 +161,70 @@ Record so far: 12W / 19L (39% win rate), -4.2R total
 The scoring rules are identical to `--backtest`, so live results and historical
 results are directly comparable. A bot that only announces entries can never be
 judged; this is what lets you tell a normal losing streak from a broken setup.
+
+---
+
+## Web dashboard
+
+```bash
+python webserver.py            # http://localhost:8000
+```
+
+A live web view of everything the Telegram alerts carry, plus the current state
+of every watched pair: price, RSI, Bollinger position, MACD, ATR%, trend, volume
+ratio, any setup firing right now, open positions marked to the live price,
+closed results, and a backtest you can run from the page.
+
+It is built on the **same modules the bot runs** — `exchange`, `indicators`,
+`strategies`, `tracker`, `backtest` — so there is no second implementation that
+could drift. What the dashboard shows and what Telegram sends cannot disagree.
+
+### Why the data is fetched server-side
+
+A browser cannot call Binance directly: exchange APIs send no CORS headers, so
+the request is blocked before it leaves the page. The dashboard therefore fetches
+through ccxt on the server and hands the browser JSON. Snapshots are cached for
+`DASHBOARD_CACHE_SECONDS` (default 45) so a page refresh does not cost ten
+exchange calls.
+
+### One service for both
+
+```bash
+RUN_BOT_IN_WEBAPP=true python webserver.py
+```
+
+runs the scanning loop in a background thread alongside the web server, so a
+single deployment sends Telegram alerts *and* serves the dashboard. On Railway
+that means one service rather than two: change the start command to
+`python webserver.py`, set `RUN_BOT_IN_WEBAPP=true`, and — unlike the
+alerts-only setup — **do** attach a public domain, because now the service
+really does listen on a port.
+
+### Protect it
+
+The dashboard holds no credentials, but it does show your trading record, and a
+Railway URL is public the moment a domain is attached. Set `DASHBOARD_TOKEN` to
+any long random string and the page opens only with the key:
+
+```
+https://your-app.up.railway.app/?key=YOUR_DASHBOARD_TOKEN
+```
+
+The key is accepted as `?key=`, an `X-Dashboard-Key` header, or the cookie set
+after the first successful open, so the page's own API calls keep working.
+`/healthz` stays open for platform probes.
+
+### Endpoints
+
+| Route | Returns |
+|---|---|
+| `/` | The dashboard page |
+| `/api/status` | Running configuration and whether the scan loop is alive |
+| `/api/market` | Live indicator values and firing setups per pair (`?refresh=true` bypasses the cache) |
+| `/api/positions` | Open tracked positions with unrealised R |
+| `/api/history` | Closed results and the cumulative scoreboard |
+| `/api/backtest` | Per-setup historical performance as JSON |
+| `/healthz` | Liveness probe |
 
 ---
 
@@ -633,6 +698,10 @@ Only the first two are required. Everything else has a working default — see
 | `TRACK_OUTCOMES` | `true` | Follow each signal to its stop or target |
 | `TRACKER_FILE` | `signal_outcomes.json` | Where outcomes and the scoreboard live |
 | `BACKTEST_CANDLES` | `1000` | History depth for `--backtest` |
+| `RUN_BOT_IN_WEBAPP` | `false` | Run the scan loop inside `webserver.py` too |
+| `DASHBOARD_CACHE_SECONDS` | `45` | How long a market snapshot is reused |
+| `DASHBOARD_TOKEN` | *(unset)* | Require `?key=` to open the dashboard |
+| `PORT` | `8000` | Port the dashboard listens on |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ---
@@ -648,9 +717,11 @@ strategies.py      Setup detection, ATR levels, confidence scoring, sizing
 notifier.py        Telegram HTML formatting and delivery with retries
 state.py           Atomic JSON state, deduplication rules, pruning
 tracker.py         Follows sent signals to their stop or target, keeps the score
+webserver.py       FastAPI dashboard: live market state, positions, backtest
+dashboard.html     The dashboard page (no build step, no framework)
 backtest.py        Historical replay with fees, per-setup performance report
 preflight.py       --preflight self-check with actionable failure hints
-tests/             161 unit and pipeline tests (no network required)
+tests/             179 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
@@ -672,7 +743,7 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-161 tests, no network needed. They cover indicator maths against hand-computed
+179 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt
