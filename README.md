@@ -31,6 +31,8 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 
 - [How it works](#how-it-works)
 - [The three setups](#the-three-setups)
+- [Does it actually work? Backtest it](#does-it-actually-work-backtest-it)
+- [Outcome tracking](#outcome-tracking)
 - [Risk levels and position sizing](#risk-levels-and-position-sizing)
 - [Confidence score](#confidence-score)
 - [Deduplication](#deduplication)
@@ -102,6 +104,62 @@ RSI parked above 30, therefore fires **once**, not every 15 minutes.
 | `bb_breakout` | Close breaks **above** the upper band(20, 2) | Close breaks **below** the lower band(20, 2) |
 
 Turn individual setups off with `ENABLED_SETUPS=rsi_reversal,macd_crossover`.
+
+---
+
+## Does it actually work? Backtest it
+
+```bash
+python main.py --backtest
+```
+
+Replays real history for your configured pairs and reports, per setup and per
+pair: signals fired, win rate, expectancy in R, total R, profit factor, and the
+longest losing streak.
+
+Read that last column carefully. A setup can be profitable on paper and still be
+unusable if it puts thirteen losses in a row between you and the profit.
+
+The replay is deliberately conservative:
+
+* **Indicators are causal**, so evaluating candle *i* against a frame that also
+  holds later candles cannot leak the future.
+* **De-duplication mirrors the live bot** (same candle suppression, same
+  cooldown), so the trade count is what you would actually have been sent.
+* **The stop wins ties.** When one candle's range contains both the stop and the
+  target, it is scored a loss — without tick data there is no way to know which
+  came first, and assuming the win would flatter every number.
+* **Round-trip fees are charged** at `FEE_PERCENT` per side. On a 15m ATR stop
+  fees are often a fifth of the risk, which is enough to turn a marginal setup
+  negative.
+
+It does not model slippage, spread, partial fills or funding, so real results
+will be worse than the report, not better. A positive number here is a reason to
+paper-trade, never a reason to size up.
+
+## Outcome tracking
+
+With `TRACK_OUTCOMES=true` (the default) every alert is recorded as an open
+position, and later scans check whether it reached its stop or target using
+candles the bot already downloaded — no extra API calls. When one resolves you
+get a short message:
+
+```
+✅ Target hit — BTC/USDT
+Setup: RSI Reversal (BUY)
+Entry: 65,000.00
+Exit: 66,600.00 (+2.46%)
+Result: +1.27R after fees
+Held: 6 candles
+
+Record so far: 12W / 19L (39% win rate), -4.2R total
+```
+
+`python main.py --report` sends the cumulative scoreboard on demand.
+
+The scoring rules are identical to `--backtest`, so live results and historical
+results are directly comparable. A bot that only announces entries can never be
+judged; this is what lets you tell a normal losing streak from a broken setup.
 
 ---
 
@@ -207,6 +265,8 @@ python main.py                     # 3. run for real
 | `--dry-run` | Scan normally but log Telegram messages instead of sending |
 | `--test-telegram` | Send one test message and exit |
 | `--preflight` | Check config, exchange, candles, indicators, state file and Telegram, print a report, exit |
+| `--backtest` | Replay history and print win rate / expectancy / profit factor per setup |
+| `--report` | Send the cumulative win/loss scoreboard to Telegram and exit |
 
 Exit codes: `0` success, `1` a check failed, `2` configuration error.
 
@@ -555,6 +615,8 @@ Only the first two are required. Everything else has a working default — see
 | `CAPITAL` | `1000` | Account size used for position sizing |
 | `RISK_PERCENT` | `1` | Percent of capital risked per trade |
 | `SHOW_POSITION_SIZE` | `true` | Include the sizing line in alerts |
+| `BEGINNER_MODE` | `true` | Add plain-language "what to do" steps to each alert |
+| `FEE_PERCENT` | `0.1` | Taker fee per side, used by tracking and backtesting |
 | `ENABLED_SETUPS` | all three | `rsi_reversal,macd_crossover,bb_breakout` |
 | `MIN_CONFIDENCE` | `1` | Drop signals scoring below this (1–3) |
 
@@ -568,6 +630,9 @@ Only the first two are required. Everything else has a working default — see
 | `HEARTBEAT_FILE` | *(unset)* | Touched after each cycle for liveness monitoring |
 | `SIGNAL_COOLDOWN_MINUTES` | `45` | Minimum gap between repeats of one key |
 | `STATE_RETENTION_DAYS` | `7` | Prune entries older than this |
+| `TRACK_OUTCOMES` | `true` | Follow each signal to its stop or target |
+| `TRACKER_FILE` | `signal_outcomes.json` | Where outcomes and the scoreboard live |
+| `BACKTEST_CANDLES` | `1000` | History depth for `--backtest` |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ---
@@ -582,8 +647,10 @@ indicators.py      RSI / MACD / Bollinger / ATR / EMA / SMA (+ pandas-ta backend
 strategies.py      Setup detection, ATR levels, confidence scoring, sizing
 notifier.py        Telegram HTML formatting and delivery with retries
 state.py           Atomic JSON state, deduplication rules, pruning
+tracker.py         Follows sent signals to their stop or target, keeps the score
+backtest.py        Historical replay with fees, per-setup performance report
 preflight.py       --preflight self-check with actionable failure hints
-tests/             110 unit and pipeline tests (no network required)
+tests/             161 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
@@ -605,7 +672,7 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-110 tests, no network needed. They cover indicator maths against hand-computed
+161 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt

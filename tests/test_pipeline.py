@@ -94,16 +94,17 @@ class RecordingNotifier:
         return not self.fail
 
     def send_signals(self, signals):
+        """Mirrors TelegramNotifier: returns the signals actually delivered."""
         signals = list(signals)
         if not signals:
-            return 0
-        from notifier import format_digest
+            return []
+        from notifier import format_digest_batches
 
-        sent = 0
-        for message in format_digest(signals, Settings()):
+        delivered = []
+        for message, batch in format_digest_batches(signals, Settings()):
             if self.send(message):
-                sent += 1
-        return sent
+                delivered.extend(batch)
+        return delivered
 
 
 class TestFetch(unittest.TestCase):
@@ -298,3 +299,127 @@ class TestHeartbeat(unittest.TestCase):
         touch_heartbeat(
             replace(Settings(), heartbeat_file=os.path.join(blocker, "heartbeat"))
         )
+
+
+class TestPartialDelivery(unittest.TestCase):
+    """A signal in a message Telegram rejected must not be marked as sent."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.settings = replace(
+            Settings(),
+            state_file=os.path.join(self.tmpdir.name, "state.json"),
+            fetch_backoff_seconds=0.0,
+        )
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_only_delivered_signals_are_recorded(self):
+        class FlakyNotifier(RecordingNotifier):
+            """Accepts the first message, rejects every later one."""
+
+            def send(self, text):
+                self.messages.append(text)
+                return len(self.messages) == 1
+
+        # Force a split: tiny limit means one message per signal.
+        import notifier as notifier_mod
+
+        original = notifier_mod.MAX_MESSAGE_CHARS
+        notifier_mod.MAX_MESSAGE_CHARS = 600
+        try:
+            exchange = FakeExchange(
+                {"BTC/USDT": bounce_series(), "ETH/USDT": bounce_series()}
+            )
+            flaky = FlakyNotifier()
+            sent = scan_once(
+                exchange, ["BTC/USDT", "ETH/USDT"], self.settings, flaky
+            )
+        finally:
+            notifier_mod.MAX_MESSAGE_CHARS = original
+
+        self.assertGreater(len(flaky.messages), 1, "expected the batch to split")
+        self.assertEqual(sent, 1, "only the accepted message's signal counts")
+
+        state = load_state(self.settings.state_file)
+        self.assertEqual(len(state), 1, "the rejected signal must stay unrecorded")
+
+    def test_undelivered_signal_is_retried_next_cycle(self):
+        class FailOnce(RecordingNotifier):
+            calls = 0
+
+            def send(self, text):
+                FailOnce.calls += 1
+                self.messages.append(text)
+                return FailOnce.calls > 1   # first send fails, later ones succeed
+
+        exchange = FakeExchange({"BTC/USDT": bounce_series()})
+        first = FailOnce()
+        self.assertEqual(scan_once(exchange, ["BTC/USDT"], self.settings, first), 0)
+        self.assertEqual(load_state(self.settings.state_file), {})
+
+        second = RecordingNotifier()
+        self.assertEqual(scan_once(exchange, ["BTC/USDT"], self.settings, second), 1)
+        self.assertEqual(len(second.messages), 1)
+
+
+class TestOutcomeTrackingInTheLoop(unittest.TestCase):
+    """A signal sent in one scan must be closed out by a later scan."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.settings = replace(
+            Settings(),
+            state_file=os.path.join(self.tmpdir.name, "state.json"),
+            tracker_file=os.path.join(self.tmpdir.name, "outcomes.json"),
+            fetch_backoff_seconds=0.0,
+        )
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_signal_is_tracked_then_resolved_on_a_later_scan(self):
+        from tracker import load_outcomes
+
+        base = bounce_series()
+        exchange = FakeExchange({"BTC/USDT": base})
+        notifier = RecordingNotifier()
+
+        # Scan 1: the bounce fires a BUY, which is recorded as an open position.
+        self.assertEqual(scan_once(exchange, ["BTC/USDT"], self.settings, notifier), 1)
+        ledger = load_outcomes(self.settings.tracker_file)
+        self.assertEqual(len(ledger["open"]), 1)
+        self.assertEqual(ledger["closed"], [])
+
+        entry = ledger["open"][0]["entry"]
+        target = ledger["open"][0]["take_profit"]
+
+        # Scan 2: append candles that reach the target, then rescan.
+        last_ts = base[-1][0]
+        reach = [
+            [last_ts + 900000, entry, target * 1.01, entry * 0.999, target, 500.0],
+            [last_ts + 1800000, target, target, target, target, 500.0],
+        ]
+        exchange.candles_by_symbol["BTC/USDT"] = base + reach
+
+        notifier2 = RecordingNotifier()
+        scan_once(exchange, ["BTC/USDT"], self.settings, notifier2)
+
+        ledger = load_outcomes(self.settings.tracker_file)
+        self.assertEqual(ledger["open"], [], "the position should be closed")
+        self.assertEqual(len(ledger["closed"]), 1)
+        self.assertEqual(ledger["closed"][0]["result"], "win")
+
+        outcome_messages = [m for m in notifier2.messages if "Target hit" in m]
+        self.assertEqual(len(outcome_messages), 1)
+        self.assertIn("R after fees", outcome_messages[0])
+        self.assertIn("Record so far", outcome_messages[0])
+
+    def test_tracking_can_be_switched_off(self):
+        from tracker import load_outcomes
+
+        settings = replace(self.settings, track_outcomes=False)
+        exchange = FakeExchange({"BTC/USDT": bounce_series()})
+        scan_once(exchange, ["BTC/USDT"], settings, RecordingNotifier())
+        self.assertEqual(load_outcomes(settings.tracker_file)["open"], [])

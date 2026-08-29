@@ -12,7 +12,7 @@ import html
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Tuple
 
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -125,7 +125,54 @@ def format_signal(signal: Signal, settings=None) -> str:
         if hint:
             lines.append(hint)
 
+    if getattr(settings, "beginner_mode", False):
+        lines.append("")
+        lines.extend(_beginner_block(signal))
+
     return "\n".join(lines)
+
+
+def _beginner_block(signal: Signal) -> List[str]:
+    """Plain-language instructions for someone who has never placed a trade.
+
+    The numbers above are useless to a beginner who does not know that the stop
+    is an *order* you place now, not a price you watch for. This spells out the
+    three orders and, for a SELL, says outright that spot accounts cannot take
+    it - which is the single most likely way a new user loses money following a
+    signal they did not understand.
+    """
+    lines = ["<b>What to do</b>"]
+
+    if signal.side == BUY:
+        lines += [
+            f"1. Buy near <code>{format_price(signal.entry)}</code> "
+            "(skip it if price has already run far past this).",
+            f"2. Immediately place a stop-loss order at "
+            f"<code>{format_price(signal.stop_loss)}</code>.",
+            f"3. Place a take-profit order at "
+            f"<code>{format_price(signal.take_profit)}</code>.",
+        ]
+    else:
+        lines += [
+            "1. <b>Spot account? Skip this one.</b> A SELL means betting the "
+            "price falls, which needs futures or margin. On spot it only "
+            f"applies if you already hold {html.escape(signal.base_asset)}.",
+            f"2. If you can short: enter near "
+            f"<code>{format_price(signal.entry)}</code>.",
+            f"3. Stop-loss <code>{format_price(signal.stop_loss)}</code>, "
+            f"take-profit <code>{format_price(signal.take_profit)}</code>.",
+        ]
+
+    lines.append(
+        "4. Then leave it alone. Both orders are set — moving a stop because "
+        "the trade went against you is how small losses become large ones."
+    )
+    lines.append(
+        "⚠️ <i>Never enter without the stop-loss order actually placed. "
+        "This setup will lose often; only the size of each loss is in your "
+        "control.</i>"
+    )
+    return lines
 
 
 def _leverage_hint(notional: float, settings) -> str:
@@ -145,41 +192,56 @@ def _leverage_hint(notional: float, settings) -> str:
     )
 
 
-def format_digest(signals: Sequence[Signal], settings=None) -> List[str]:
-    """Group signals into one or more Telegram-sized messages.
+def format_digest_batches(
+    signals: Sequence[Signal], settings=None
+) -> List[Tuple[str, List[Signal]]]:
+    """Group signals into Telegram-sized messages, keeping the mapping.
 
     Signals are concatenated with a visual separator until the next one would
-    push the message past Telegram's 4096-character limit, then a new message
-    is started.
+    push the message past Telegram's 4096-character limit, then a new message is
+    started. Each entry pairs the rendered message with the signals inside it, so
+    the caller knows exactly which signals a failed send lost.
     """
     if not signals:
         return []
 
-    blocks = [format_signal(s, settings) for s in signals]
     reserve = len(DISCLAIMER) + 4
+    batches: List[Tuple[str, List[Signal]]] = []
+    blocks: List[str] = []
+    batch: List[Signal] = []
+    length = 0
 
-    messages: List[str] = []
-    current: List[str] = []
-    current_len = 0
+    def flush():
+        if blocks:
+            batches.append(
+                (SEPARATOR.join(blocks) + "\n\n" + DISCLAIMER, list(batch))
+            )
 
-    for block in blocks:
+    for signal in signals:
+        block = format_signal(signal, settings)
         addition = len(block) + len(SEPARATOR)
-        if current and current_len + addition + reserve > MAX_MESSAGE_CHARS:
-            messages.append(SEPARATOR.join(current) + "\n\n" + DISCLAIMER)
-            current, current_len = [], 0
-        current.append(block)
-        current_len += addition
+        if blocks and length + addition + reserve > MAX_MESSAGE_CHARS:
+            flush()
+            blocks, batch, length = [], [], 0
+        blocks.append(block)
+        batch.append(signal)
+        length += addition
 
-    if current:
-        messages.append(SEPARATOR.join(current) + "\n\n" + DISCLAIMER)
+    flush()
 
-    if len(signals) > 1 and messages:
+    if len(signals) > 1 and batches:
         header = (
             f"📊 <b>{len(signals)} new signals</b> · "
             f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
         )
-        messages[0] = header + "\n\n" + messages[0]
-    return messages
+        text, first = batches[0]
+        batches[0] = (header + "\n\n" + text, first)
+    return batches
+
+
+def format_digest(signals: Sequence[Signal], settings=None) -> List[str]:
+    """Rendered messages only — the text half of :func:`format_digest_batches`."""
+    return [text for text, _ in format_digest_batches(signals, settings)]
 
 
 # ---------------------------------------------------------------------------
@@ -212,15 +274,28 @@ class TelegramNotifier:
             LOG.exception("Unexpected Telegram failure: %s", exc)
             return False
 
-    def send_signals(self, signals: Iterable[Signal]) -> int:
-        """Format and send a batch of signals. Returns messages delivered."""
+    def send_signals(self, signals: Iterable[Signal]) -> List[Signal]:
+        """Format and send a batch of signals.
+
+        Returns the signals that actually reached Telegram. A batch can split
+        across several messages and any one of them can fail on its own, so
+        returning the delivered subset lets the caller record only those as
+        sent - a signal in a failed message is then retried next cycle instead
+        of being silently suppressed by de-duplication.
+        """
         signals = list(signals)
         if not signals:
-            return 0
-        delivered = 0
-        for message in format_digest(signals, self.settings):
+            return []
+
+        delivered: List[Signal] = []
+        for message, batch in format_digest_batches(signals, self.settings):
             if self.send(message):
-                delivered += 1
+                delivered.extend(batch)
+            else:
+                LOG.error(
+                    "Telegram rejected the message carrying %d signal(s): %s",
+                    len(batch), ", ".join(s.dedupe_key for s in batch),
+                )
         return delivered
 
     async def _send_async(self, text: str) -> bool:
@@ -266,3 +341,81 @@ class TelegramNotifier:
 def send_telegram(settings, text: str, dry_run: bool = False) -> bool:
     """Module-level convenience wrapper used by scripts and tests."""
     return TelegramNotifier(settings, dry_run=dry_run).send(text)
+
+
+# ---------------------------------------------------------------------------
+# Outcome and scoreboard messages
+# ---------------------------------------------------------------------------
+def format_outcome(outcome, ledger=None) -> str:
+    """Report a position that reached its stop or target.
+
+    Closing the loop matters more than it looks: a bot that only announces
+    entries can never be judged, and a beginner has no way to tell a losing
+    streak from a broken bot.
+    """
+    won = outcome.result == "win"
+    icon = "✅" if won else "❌"
+    verdict = "Target hit" if won else "Stop hit"
+    esc = html.escape
+
+    lines = [
+        f"{icon} <b>{esc(verdict)}</b> — {esc(outcome.symbol)}",
+        "",
+        f"<b>Setup:</b> {esc(outcome.setup_label)} ({esc(outcome.side)})",
+        f"<b>Entry:</b> <code>{format_price(outcome.entry)}</code>",
+        f"<b>Exit:</b> <code>{format_price(outcome.exit_price)}</code> "
+        f"({outcome.pct:+.2f}%)",
+        f"<b>Result:</b> {outcome.r_multiple:+.2f}R after fees",
+        f"<b>Held:</b> {outcome.candles_held} candle"
+        f"{'s' if outcome.candles_held != 1 else ''}",
+    ]
+
+    if ledger is not None:
+        from tracker import scoreboard
+
+        wins, losses, total_r, rate = scoreboard(ledger)
+        if wins + losses:
+            lines += [
+                "",
+                f"<b>Record so far:</b> {wins}W / {losses}L "
+                f"({rate:.0f}% win rate), {total_r:+.1f}R total",
+            ]
+    return "\n".join(lines)
+
+
+def format_scoreboard(ledger, settings=None) -> str:
+    """Cumulative results across every signal the bot has sent."""
+    from tracker import scoreboard
+
+    wins, losses, total_r, rate = scoreboard(ledger)
+    closed = wins + losses
+    open_count = len(ledger.get("open") or [])
+
+    if not closed:
+        return (
+            "📋 <b>Scoreboard</b>\n\n"
+            f"No positions have closed yet. {open_count} still open.\n"
+            "<i>Results appear here as signals reach their stop or target.</i>"
+        )
+
+    risk_pct = getattr(settings, "risk_percent", 1.0) if settings else 1.0
+    lines = [
+        "📋 <b>Scoreboard</b>",
+        "",
+        f"<b>Closed:</b> {closed}  ({wins}W / {losses}L)",
+        f"<b>Win rate:</b> {rate:.1f}%",
+        f"<b>Total:</b> {total_r:+.2f}R after fees",
+        f"<b>Average:</b> {total_r / closed:+.3f}R per signal",
+        f"<b>Still open:</b> {open_count}",
+    ]
+    if risk_pct:
+        lines.append(
+            f"\n<i>At {risk_pct:g}% risk per trade that is roughly "
+            f"{total_r * risk_pct:+.1f}% on the account, before compounding.</i>"
+        )
+    if total_r < 0:
+        lines.append(
+            "\n⚠️ <i>These signals have lost money so far. That is real "
+            "information — do not increase your size to win it back.</i>"
+        )
+    return "\n".join(lines)

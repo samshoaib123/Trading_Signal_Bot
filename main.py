@@ -18,6 +18,8 @@ Usage::
     python main.py --dry-run       # scan and log messages without sending them
     python main.py --test-telegram # verify the token / chat id wiring
     python main.py --preflight     # check everything at once before deploying
+    python main.py --backtest      # how these setups actually performed on history
+    python main.py --report        # send the running win/loss scoreboard
 """
 
 from __future__ import annotations
@@ -34,10 +36,12 @@ from typing import List
 from config import ConfigError, Settings, configure_logging, load_settings
 from exchange import ExchangeError, create_exchange, fetch_ohlcv, load_valid_symbols
 from indicators import calculate_indicators, resolve_backend
-from notifier import TelegramNotifier
+from notifier import TelegramNotifier, format_outcome, format_scoreboard
+from backtest import run_backtest
 from preflight import run_preflight
 from state import load_state, prune_state, record_signal, save_state, should_send
 from strategies import Signal, detect_signals
+from tracker import load_outcomes, resolve_open, save_outcomes, track_signal
 
 LOG = logging.getLogger("signal_bot")
 
@@ -80,7 +84,9 @@ def sleep_until(target: datetime) -> None:
 def scan_once(exchange, symbols: List[str], settings: Settings, notifier: TelegramNotifier) -> int:
     """Run one full scan across every symbol. Returns signals sent."""
     state = prune_state(load_state(settings.state_file), settings.state_retention_days)
+    ledger = load_outcomes(settings.tracker_file)
     fresh: List[Signal] = []
+    resolved = []
     scanned = 0
 
     for symbol in symbols:
@@ -90,6 +96,9 @@ def scan_once(exchange, symbols: List[str], settings: Settings, notifier: Telegr
             df = fetch_ohlcv(exchange, symbol, settings)
             if df is None or df.empty:
                 continue
+            # Close out any tracked position using the candles we just fetched,
+            # before looking for new entries. Costs no extra API calls.
+            resolved.extend(resolve_open(symbol, df, ledger, settings))
             df = calculate_indicators(df, settings)
             found = detect_signals(symbol, df, settings)
             scanned += 1
@@ -110,11 +119,22 @@ def scan_once(exchange, symbols: List[str], settings: Settings, notifier: Telegr
                 LOG.debug("%s: duplicate suppressed", sig.dedupe_key)
 
     LOG.info(
-        "Scan complete: %d/%d symbols OK, %d new signal(s)",
-        scanned, len(symbols), len(fresh),
+        "Scan complete: %d/%d symbols OK, %d new signal(s), %d closed position(s)",
+        scanned, len(symbols), len(fresh), len(resolved),
     )
 
+    # Report closed positions first: knowing the last call was wrong is context
+    # for the next one.
+    for outcome in resolved:
+        LOG.info(
+            "%s %s %s closed: %s %+.2fR",
+            outcome.symbol, outcome.setup, outcome.side,
+            outcome.result, outcome.r_multiple,
+        )
+        notifier.send(format_outcome(outcome, ledger))
+
     if not fresh:
+        save_outcomes(settings.tracker_file, ledger)
         save_state(settings.state_file, state)
         return 0
 
@@ -122,14 +142,25 @@ def scan_once(exchange, symbols: List[str], settings: Settings, notifier: Telegr
     fresh.sort(key=lambda s: (-s.confidence, s.symbol, s.setup))
     delivered = notifier.send_signals(fresh)
 
-    if delivered:
-        for sig in fresh:
-            record_signal(sig, state)
-    else:
-        LOG.error("Telegram delivery failed; not recording state so we retry next cycle")
+    # Record only what Telegram actually accepted. A batch can split into several
+    # messages and any one of them can fail; recording the whole batch would let
+    # de-duplication suppress a signal the user never received.
+    for sig in delivered:
+        record_signal(sig, state)
 
+    if len(delivered) < len(fresh):
+        LOG.error(
+            "%d of %d signal(s) were not delivered; left unrecorded so the next "
+            "cycle retries them",
+            len(fresh) - len(delivered), len(fresh),
+        )
+
+    for sig in delivered:
+        track_signal(sig, ledger, settings)
+
+    save_outcomes(settings.tracker_file, ledger)
     save_state(settings.state_file, state)
-    return len(fresh) if delivered else 0
+    return len(delivered)
 
 
 def touch_heartbeat(settings: Settings) -> None:
@@ -179,6 +210,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="log Telegram messages instead of sending them")
     parser.add_argument("--test-telegram", action="store_true",
                         help="send a test message and exit")
+    parser.add_argument("--report", action="store_true",
+                        help="send the cumulative win/loss scoreboard and exit")
+    parser.add_argument("--backtest", action="store_true",
+                        help="replay history for the configured pairs and print "
+                             "win rate, expectancy and profit factor per setup")
     parser.add_argument("--preflight", action="store_true",
                         help="check config, exchange, data, state and Telegram, "
                              "then print a report and exit")
@@ -195,6 +231,18 @@ def main(argv=None) -> int:
     if args.preflight:
         return run_preflight(settings, TelegramNotifier(settings, dry_run=args.dry_run))
 
+    if args.backtest:
+        # No Telegram credentials needed: this only reads public candles.
+        try:
+            exchange = create_exchange(settings)
+            symbols = load_valid_symbols(exchange, settings.symbols)
+        except ExchangeError as exc:
+            LOG.error("%s", exc)
+            return 2
+        print(run_backtest(exchange, symbols, settings,
+                           settings.backtest_candles, settings.fee_percent))
+        return 0
+
     if not args.dry_run:
         try:
             settings.require_telegram()
@@ -209,6 +257,12 @@ def main(argv=None) -> int:
             "🔔 <b>Test message</b>\nYour crypto signal bot is wired up correctly."
         )
         LOG.info("Telegram test %s", "succeeded" if ok else "FAILED")
+        return 0 if ok else 1
+
+    if args.report:
+        ledger = load_outcomes(settings.tracker_file)
+        ok = notifier.send(format_scoreboard(ledger, settings))
+        LOG.info("Scoreboard %s", "sent" if ok else "FAILED to send")
         return 0 if ok else 1
 
     try:

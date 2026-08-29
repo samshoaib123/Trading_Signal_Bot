@@ -116,7 +116,10 @@ class Settings:
     atr_tp_multiplier: float = 2.0
     capital: float = 1000.0
     risk_percent: float = 1.0
+    fee_percent: float = 0.1
+    backtest_candles: int = 1000
     show_position_size: bool = True
+    beginner_mode: bool = True
     min_confidence: int = 1
     enabled_setups: List[str] = field(
         default_factory=lambda: ["rsi_reversal", "macd_crossover", "bb_breakout"]
@@ -127,6 +130,8 @@ class Settings:
     candle_close_buffer_seconds: int = 15
     state_file: str = "signal_state.json"
     heartbeat_file: str = ""
+    tracker_file: str = "signal_outcomes.json"
+    track_outcomes: bool = True
     signal_cooldown_minutes: int = 45
     state_retention_days: int = 7
     log_level: str = "INFO"
@@ -184,7 +189,10 @@ def load_settings() -> Settings:
         atr_tp_multiplier=_get_float("ATR_TP_MULTIPLIER", 2.0),
         capital=_get_float("CAPITAL", 1000.0),
         risk_percent=_get_float("RISK_PERCENT", 1.0),
+        fee_percent=_get_float("FEE_PERCENT", 0.1),
+        backtest_candles=_get_int("BACKTEST_CANDLES", 1000),
         show_position_size=_get_bool("SHOW_POSITION_SIZE", True),
+        beginner_mode=_get_bool("BEGINNER_MODE", True),
         min_confidence=_get_int("MIN_CONFIDENCE", 1),
         enabled_setups=[
             s.lower()
@@ -196,6 +204,9 @@ def load_settings() -> Settings:
         candle_close_buffer_seconds=_get_int("CANDLE_CLOSE_BUFFER_SECONDS", 15),
         state_file=_get_str("STATE_FILE", "signal_state.json") or "signal_state.json",
         heartbeat_file=_get_str("HEARTBEAT_FILE"),
+        tracker_file=_get_str("TRACKER_FILE", "signal_outcomes.json")
+        or "signal_outcomes.json",
+        track_outcomes=_get_bool("TRACK_OUTCOMES", True),
         signal_cooldown_minutes=_get_int("SIGNAL_COOLDOWN_MINUTES", 45),
         state_retention_days=_get_int("STATE_RETENTION_DAYS", 7),
         log_level=_get_str("LOG_LEVEL", "INFO").upper() or "INFO",
