@@ -1,0 +1,12 @@
+.env
+local_config.py
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+signal_state.json
+signal_outcomes.json
+heartbeat
+*.log
+.pytest_cache/
+.DS_Store

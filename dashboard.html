@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto Signal Bot — Live Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#F5F7F9; --surface:#FCFCFB; --surface-2:#EDF0F4;
+  --line:#D8DEE7; --line-soft:#E6EAF0;
+  --ink:#0B0B0B; --ink-2:#3D4757; --muted:#616D7E;
+  --accent:#1B57C4; --accent-soft:#E5EDFB;
+  /* Status palette — reserved for state, never decorative, always with a label. */
+  --good:#0CA30C; --warning:#FAB219; --serious:#EC835A; --critical:#D03B3B;
+  --good-ink:#0A7A0A; --critical-ink:#A82F2F;
+  --good-soft:#E4F5E4; --critical-soft:#FBE8E8; --warn-soft:#FDF3DE;
+  --track:#DFE4EB;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1219; --surface:#161B24; --surface-2:#1D242F;
+    --line:#2B3441; --line-soft:#232B37;
+    --ink:#E6EAF1; --ink-2:#BAC3D0; --muted:#8B97A8;
+    --accent:#6BA0FF; --accent-soft:#17233A;
+    --good-ink:#4FBE85; --critical-ink:#F08A8A;
+    --good-soft:#12271D; --critical-soft:#2C1717; --warn-soft:#2A2016;
+    --track:#2B3441;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1219; --surface:#161B24; --surface-2:#1D242F;
+  --line:#2B3441; --line-soft:#232B37;
+  --ink:#E6EAF1; --ink-2:#BAC3D0; --muted:#8B97A8;
+  --accent:#6BA0FF; --accent-soft:#17233A;
+  --good-ink:#4FBE85; --critical-ink:#F08A8A;
+  --good-soft:#12271D; --critical-soft:#2C1717; --warn-soft:#2A2016;
+  --track:#2B3441;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--ground);color:var(--ink);
+  font-family:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:26px 20px 70px}
+h1,h2{font-family:Archivo,ui-sans-serif,system-ui,sans-serif;margin:0;text-wrap:balance}
+.mono,code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+.num{font-variant-numeric:tabular-nums;font-family:"IBM Plex Mono",monospace}
+
+/* header */
+header{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;justify-content:space-between;
+  padding-bottom:18px;margin-bottom:22px;border-bottom:1px solid var(--line)}
+h1{font-size:23px;font-weight:700;letter-spacing:-.02em}
+.sub{font-size:13px;color:var(--muted);margin-top:3px}
+.pills{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.pill{font-family:"IBM Plex Mono",monospace;font-size:11.5px;padding:4px 9px;border-radius:3px;
+  border:1px solid var(--line);color:var(--muted);background:var(--surface);white-space:nowrap}
+.pill.live{color:var(--good-ink);background:var(--good-soft);border-color:transparent}
+.pill.stopped{color:var(--critical-ink);background:var(--critical-soft);border-color:transparent}
+button.act{font:inherit;font-size:13px;padding:6px 13px;border-radius:4px;cursor:pointer;
+  border:1px solid var(--line);background:var(--surface);color:var(--ink);
+  transition:border-color .12s,background .12s}
+button.act:hover{border-color:var(--accent);background:var(--accent-soft)}
+button.act:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.act[disabled]{opacity:.55;cursor:default}
+
+/* KPI stat tiles — a headline number is not a chart */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:1px;
+  background:var(--line-soft);border:1px solid var(--line-soft);border-radius:6px;
+  overflow:hidden;margin-bottom:26px}
+.kpi{background:var(--surface);padding:14px 16px}
+.kpi .label{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted)}
+.kpi .value{font-family:Archivo,sans-serif;font-size:26px;font-weight:700;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;line-height:1.25;margin-top:3px}
+.kpi .foot{font-size:12px;color:var(--muted);margin-top:1px}
+.value.pos{color:var(--good-ink)} .value.neg{color:var(--critical-ink)}
+
+section{margin-bottom:30px}
+.sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:11px}
+h2{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.sec-head .hint{font-size:12.5px;color:var(--muted)}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line-soft);white-space:nowrap}
+th{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);font-weight:500;background:var(--surface-2);position:sticky;top:0}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:var(--surface-2)}
+td.r,th.r{text-align:right}
+
+/* meters: bounded position, not a series — neutral track + zone bands + marker */
+.meter{display:flex;align-items:center;gap:9px;min-width:132px}
+.meter .track{position:relative;flex:1;height:6px;border-radius:3px;background:var(--track);overflow:hidden}
+.meter .zone{position:absolute;top:0;bottom:0;opacity:.28}
+.meter .zone.lo{left:0;background:var(--warning)}
+.meter .zone.hi{right:0;background:var(--warning)}
+.meter .mark{position:absolute;top:-3px;width:4px;height:12px;border-radius:2px;
+  background:var(--ink);transform:translateX(-2px)}
+.meter .val{font-variant-numeric:tabular-nums;font-family:"IBM Plex Mono",monospace;
+  font-size:12.5px;min-width:34px;text-align:right}
+
+.badge{display:inline-flex;align-items:center;gap:5px;font-family:"IBM Plex Mono",monospace;
+  font-size:11px;padding:2px 7px;border-radius:3px;font-weight:500}
+.badge.buy{color:var(--good-ink);background:var(--good-soft)}
+.badge.sell{color:var(--critical-ink);background:var(--critical-soft)}
+.badge.flat{color:var(--muted);background:var(--surface-2)}
+.dot{width:6px;height:6px;border-radius:50%;flex:none}
+.dot.buy{background:var(--good)} .dot.sell{background:var(--critical)}
+
+.pos{color:var(--good-ink)} .neg{color:var(--critical-ink)}
+.stars{letter-spacing:1px}
+
+/* live signal cards */
+.sigs{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:12px}
+.sig{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+.sig.buy{border-left:3px solid var(--good)}
+.sig.sell{border-left:3px solid var(--critical)}
+.sig h3{margin:0 0 8px;font-family:Archivo,sans-serif;font-size:15px;font-weight:600;
+  display:flex;align-items:center;gap:8px;justify-content:space-between}
+.sig dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-size:13px}
+.sig dt{color:var(--muted)}
+.sig dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;font-family:"IBM Plex Mono",monospace}
+
+.empty{padding:22px 16px;text-align:center;color:var(--muted);font-size:13.5px}
+.note{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:13px 15px;
+  font-size:13.5px;color:var(--ink-2);margin-top:12px}
+.note b{color:var(--ink)}
+.note.warn{background:var(--warn-soft);border-color:transparent}
+footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Crypto Signal Bot</h1>
+      <div class="sub" id="subtitle">Loading live market data…</div>
+    </div>
+    <div class="pills" id="pills">
+      <button class="act" id="refresh">Refresh</button>
+    </div>
+  </header>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section id="live-section">
+    <div class="sec-head">
+      <h2>Signals firing right now</h2>
+      <span class="hint">Evaluated on the last closed candle</span>
+    </div>
+    <div id="live"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Watchlist</h2>
+      <span class="hint">RSI band 30–70 shaded · BB position 0 = lower band, 100 = upper</span>
+    </div>
+    <div class="card scroll"><table id="market">
+      <thead><tr>
+        <th>Pair</th><th class="r">Price</th><th class="r">Change</th>
+        <th>RSI(14)</th><th>Bollinger</th><th>MACD</th>
+        <th class="r">ATR%</th><th>Trend</th><th class="r">Vol×</th><th>Setup</th>
+      </tr></thead>
+      <tbody><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Open positions</h2>
+      <span class="hint">Unrealised result in R — multiples of the risk taken</span>
+    </div>
+    <div class="card scroll"><table id="positions">
+      <thead><tr>
+        <th>Pair</th><th>Setup</th><th>Side</th><th class="r">Entry</th>
+        <th class="r">Now</th><th class="r">Stop</th><th class="r">Target</th><th class="r">Unrealised</th>
+      </tr></thead>
+      <tbody><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Closed results</h2>
+      <span class="hint">Stop wins ties inside a candle · fees included</span>
+    </div>
+    <div class="card scroll"><table id="history">
+      <thead><tr>
+        <th>Closed</th><th>Pair</th><th>Setup</th><th>Side</th>
+        <th class="r">Entry</th><th class="r">Exit</th><th class="r">Move</th><th class="r">Result</th>
+      </tr></thead>
+      <tbody><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Backtest</h2>
+      <button class="act" id="run-bt">Run on recent history</button>
+    </div>
+    <div id="bt"></div>
+  </section>
+
+  <footer>
+    Signals only — this dashboard places no orders and holds no exchange keys.
+    Past results, historical or live, do not predict future ones.
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const REFRESH_MS = 45000;
+
+/* ---------- formatting ---------- */
+function price(v){
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  const d = a >= 1000 ? 2 : a >= 10 ? 3 : a >= 1 ? 4 : a >= 0.01 ? 6 : 8;
+  return v.toLocaleString(undefined, {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function signed(v, digits=2, suffix=""){
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(digits) + suffix;
+}
+function cls(v){ return v === null || v === undefined || !isFinite(v) ? "" : (v >= 0 ? "pos" : "neg"); }
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function stars(n){ return "★".repeat(n) + "☆".repeat(Math.max(0, 3 - n)); }
+function timeAgo(iso){
+  if (!iso) return "—";
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 90) return Math.max(0, Math.round(secs)) + "s ago";
+  if (secs < 5400) return Math.round(secs / 60) + "m ago";
+  if (secs < 172800) return Math.round(secs / 3600) + "h ago";
+  return Math.round(secs / 86400) + "d ago";
+}
+function shortTime(iso){
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toISOString().slice(5, 16).replace("T", " ");
+}
+
+/* A bounded meter: neutral track, shaded out-of-band zones, a marker at the value.
+   Not a series — no categorical color, and the number is always shown. */
+function meter(value, loPct, hiPct){
+  if (value === null || value === undefined || !isFinite(value))
+    return '<span class="mono" style="color:var(--muted)">—</span>';
+  const pos = Math.max(0, Math.min(100, value));
+  return `<span class="meter">
+    <span class="track">
+      <span class="zone lo" style="width:${loPct}%"></span>
+      <span class="zone hi" style="width:${100 - hiPct}%"></span>
+      <span class="mark" style="left:${pos}%"></span>
+    </span>
+    <span class="val">${value.toFixed(0)}</span>
+  </span>`;
+}
+
+async function getJSON(url){
+  const res = await fetch(url, {headers:{"Accept":"application/json"}});
+  if (!res.ok) throw new Error(url + " → " + res.status);
+  return res.json();
+}
+
+/* ---------- renderers ---------- */
+function renderStatus(s, market){
+  $("subtitle").textContent =
+    `${s.symbols.length} pairs · ${s.timeframe} · ${s.exchange} · ` +
+    `stop ${s.atr_sl}× / target ${s.atr_tp}× ATR · risking ${s.risk_percent}% of ${s.capital.toLocaleString()}`;
+
+  const pills = [
+    `<span class="pill ${s.bot_loop_running ? "live" : ""}">${s.bot_loop_running ? "scanner running" : "dashboard only"}</span>`,
+    `<span class="pill">min confidence ${s.min_confidence}/3</span>`,
+    `<span class="pill">fees ${s.fee_percent}%</span>`,
+    `<span class="pill" id="stamp" data-iso="${esc(market.fetched_at)}">updated ${timeAgo(market.fetched_at)}</span>`,
+  ];
+  $("pills").innerHTML = pills.join("") +
+    '<button class="act" id="refresh">Refresh</button>';
+  $("refresh").addEventListener("click", () => refresh(true));
+}
+
+function renderKpis(sb, openCount, market){
+  const failed = (market.failed || []).length;
+  const tiles = [
+    {label:"Win rate", value: sb.closed ? sb.win_rate.toFixed(0) + "%" : "—",
+     foot: sb.closed ? `${sb.wins}W / ${sb.losses}L` : "no closed trades yet"},
+    {label:"Total R", value: sb.closed ? signed(sb.total_r, 1) : "—",
+     foot: sb.closed ? `≈ ${signed(sb.account_pct,1)}% on the account` : "after fees",
+     tone: sb.closed ? (sb.total_r >= 0 ? "pos" : "neg") : ""},
+    {label:"Closed", value: String(sb.closed), foot:"resolved to stop or target"},
+    {label:"Open", value: String(openCount), foot:"positions being tracked"},
+    {label:"Pairs live", value: `${market.rows.length}`,
+     foot: failed ? `${failed} failed to fetch` : "all fetched"},
+  ];
+  $("kpis").innerHTML = tiles.map(t => `
+    <div class="kpi">
+      <div class="label">${esc(t.label)}</div>
+      <div class="value ${t.tone || ""}">${esc(t.value)}</div>
+      <div class="foot">${esc(t.foot)}</div>
+    </div>`).join("");
+}
+
+function renderLive(market){
+  const live = [];
+  market.rows.forEach(r => (r.signals || []).forEach(s => live.push({row:r, sig:s})));
+
+  if (!live.length){
+    $("live").innerHTML = `<div class="card"><div class="empty">
+      No setup is firing on the last closed candle. This is the normal state —
+      a fresh cross on a 15m chart is not an every-hour event.
+    </div></div>`;
+    return;
+  }
+  $("live").innerHTML = '<div class="sigs">' + live.map(({row, sig}) => {
+    const buy = sig.side === "BUY";
+    return `<div class="sig ${buy ? "buy" : "sell"}">
+      <h3><span>${esc(row.symbol)}</span>
+        <span class="badge ${buy ? "buy" : "sell"}">
+          <span class="dot ${buy ? "buy" : "sell"}"></span>${esc(sig.side)}</span></h3>
+      <dl>
+        <dt>Setup</dt><dd style="font-family:inherit">${esc(sig.setup_label)}</dd>
+        <dt>Entry</dt><dd>${price(sig.entry)}</dd>
+        <dt>Stop</dt><dd class="neg">${price(sig.stop_loss)}</dd>
+        <dt>Target</dt><dd class="pos">${price(sig.take_profit)}</dd>
+        <dt>Confidence</dt><dd><span class="stars">${stars(sig.confidence)}</span> ${sig.confidence}/3</dd>
+      </dl>
+      ${sig.confirmations && sig.confirmations.length
+        ? `<div style="margin-top:8px;font-size:12.5px;color:var(--muted)">${esc(sig.confirmations.join(" · "))}</div>`
+        : ""}
+    </div>`;
+  }).join("") + "</div>";
+}
+
+function renderMarket(market){
+  const body = $("market").querySelector("tbody");
+  if (!market.rows.length){
+    body.innerHTML = `<tr><td colspan="10" class="empty">No market data. Check the server logs — a 451 means this region is geo-blocked by the exchange.</td></tr>`;
+    return;
+  }
+  body.innerHTML = market.rows.map(r => {
+    const sig = (r.signals || [])[0];
+    const setupCell = sig
+      ? `<span class="badge ${sig.side === "BUY" ? "buy" : "sell"}">
+           <span class="dot ${sig.side === "BUY" ? "buy" : "sell"}"></span>${esc(sig.side)}
+         </span> <span style="font-size:12px;color:var(--muted)">${esc(sig.setup_label)}</span>`
+      : `<span class="badge flat">none</span>`;
+    const macd = r.macd_above_signal === null ? "—"
+      : `<span class="badge ${r.macd_above_signal ? "buy" : "sell"}">${r.macd_above_signal ? "above" : "below"}</span>`;
+    const trend = r.trend === null ? "—"
+      : `<span class="badge ${r.trend === "up" ? "buy" : "sell"}">${r.trend === "up" ? "up" : "down"}</span>`;
+    return `<tr>
+      <td><b>${esc(r.symbol)}</b></td>
+      <td class="r num">${price(r.price)}</td>
+      <td class="r num ${cls(r.change_pct)}">${signed(r.change_pct, 2, "%")}</td>
+      <td>${meter(r.rsi, 30, 70)}</td>
+      <td>${meter(r.bb_position, 0, 100)}</td>
+      <td>${macd}</td>
+      <td class="r num">${r.atr_pct === null ? "—" : r.atr_pct.toFixed(2)}</td>
+      <td>${trend}</td>
+      <td class="r num">${r.volume_ratio === null ? "—" : r.volume_ratio.toFixed(2)}</td>
+      <td>${setupCell}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderPositions(data){
+  const body = $("positions").querySelector("tbody");
+  if (!data.open.length){
+    body.innerHTML = `<tr><td colspan="8" class="empty">No open positions. One appears here each time the bot sends a signal.</td></tr>`;
+    return;
+  }
+  body.innerHTML = data.open.map(p => `<tr>
+    <td><b>${esc(p.symbol)}</b></td>
+    <td style="font-size:12.5px;color:var(--muted)">${esc(p.setup)}</td>
+    <td><span class="badge ${p.side === "BUY" ? "buy" : "sell"}">${esc(p.side)}</span></td>
+    <td class="r num">${price(p.entry)}</td>
+    <td class="r num">${price(p.price)}</td>
+    <td class="r num neg">${price(p.stop_loss)}</td>
+    <td class="r num pos">${price(p.take_profit)}</td>
+    <td class="r num ${cls(p.unrealised_r)}">${signed(p.unrealised_r, 2, "R")}</td>
+  </tr>`).join("");
+}
+
+function renderHistory(data){
+  const body = $("history").querySelector("tbody");
+  if (!data.closed.length){
+    body.innerHTML = `<tr><td colspan="8" class="empty">Nothing has closed yet. Results land here when a signal reaches its stop or target.</td></tr>`;
+    return;
+  }
+  body.innerHTML = data.closed.map(c => {
+    const won = c.result === "win";
+    const move = c.entry ? ((c.exit_price - c.entry) / c.entry * 100) * (c.side === "BUY" ? 1 : -1) : null;
+    return `<tr>
+      <td class="num" style="font-size:12.5px;color:var(--muted)">${esc(shortTime(c.closed_at))}</td>
+      <td><b>${esc(c.symbol)}</b></td>
+      <td style="font-size:12.5px;color:var(--muted)">${esc(c.setup)}</td>
+      <td><span class="badge ${c.side === "BUY" ? "buy" : "sell"}">${esc(c.side)}</span></td>
+      <td class="r num">${price(c.entry)}</td>
+      <td class="r num">${price(c.exit_price)}</td>
+      <td class="r num ${cls(move)}">${signed(move, 2, "%")}</td>
+      <td class="r"><span class="badge ${won ? "buy" : "sell"}">
+        ${won ? "target" : "stop"} ${signed(c.r_multiple, 2, "R")}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderBacktest(bt){
+  const rows = (list) => list.map(s => `<tr>
+    <td><b>${esc(s.name)}</b></td>
+    <td class="r num">${s.signals}</td>
+    <td class="r num">${s.closed}</td>
+    <td class="r num">${s.closed ? s.win_rate.toFixed(1) + "%" : "—"}</td>
+    <td class="r num ${cls(s.expectancy)}">${signed(s.expectancy, 3)}</td>
+    <td class="r num ${cls(s.total_r)}">${signed(s.total_r, 1)}</td>
+    <td class="r num">${s.profit_factor === null ? "∞" : s.profit_factor.toFixed(2)}</td>
+    <td class="r num">${s.max_consecutive_losses}</td>
+  </tr>`).join("");
+
+  const head = `<thead><tr><th>Bucket</th><th class="r">Signals</th><th class="r">Closed</th>
+    <th class="r">Win%</th><th class="r">Exp(R)</th><th class="r">Total R</th>
+    <th class="r">PF</th><th class="r">Max losses</th></tr></thead>`;
+
+  const negative = bt.overall.expectancy < 0;
+  $("bt").innerHTML = `
+    <div class="card scroll"><table>${head}<tbody>
+      ${rows(bt.by_setup)}
+      <tr><td colspan="8" style="background:var(--surface-2);height:6px;padding:0"></td></tr>
+      ${rows(bt.by_symbol)}
+      <tr style="border-top:2px solid var(--line)">
+        <td><b>ALL</b></td>
+        <td class="r num">${bt.overall.signals}</td>
+        <td class="r num">${bt.overall.closed}</td>
+        <td class="r num">${bt.overall.closed ? bt.overall.win_rate.toFixed(1) + "%" : "—"}</td>
+        <td class="r num ${cls(bt.overall.expectancy)}">${signed(bt.overall.expectancy, 3)}</td>
+        <td class="r num ${cls(bt.overall.total_r)}">${signed(bt.overall.total_r, 1)}</td>
+        <td class="r num">${bt.overall.profit_factor === null ? "∞" : bt.overall.profit_factor.toFixed(2)}</td>
+        <td class="r num">${bt.overall.max_consecutive_losses}</td>
+      </tr>
+    </tbody></table></div>
+    <div class="note ${negative ? "warn" : ""}">
+      <b>${negative
+        ? "On this history these settings lost money."
+        : "Positive on this sample — that is not the same as an edge."}</b><br>
+      ${bt.candles} candles per pair, fees ${bt.fee_percent}% per side. When one candle
+      contained both the stop and the target it was scored a loss, because tick order is
+      unknowable. Slippage and spread are not modelled, so live results will be worse than
+      this, not better. <b>Max losses</b> is the column that decides whether you could
+      actually keep following the bot through a bad run.
+    </div>`;
+}
+
+/* ---------- loop ---------- */
+let refreshing = false;
+async function refresh(force){
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const market = await getJSON("/api/market" + (force ? "?refresh=true" : ""));
+    const [status, positions, history] = await Promise.all([
+      getJSON("/api/status"), getJSON("/api/positions"), getJSON("/api/history?limit=40"),
+    ]);
+    renderStatus(status, market);
+    renderKpis(history.scoreboard, positions.count, market);
+    renderLive(market);
+    renderMarket(market);
+    renderPositions(positions);
+    renderHistory(history);
+  } catch (err) {
+    $("subtitle").textContent = "Could not reach the bot server: " + err.message;
+  } finally {
+    refreshing = false;
+  }
+}
+
+$("refresh").addEventListener("click", () => refresh(true));
+$("run-bt").addEventListener("click", async () => {
+  const btn = $("run-bt");
+  btn.disabled = true;
+  btn.textContent = "Running… this downloads deep history";
+  $("bt").innerHTML = '<div class="card"><div class="empty">Replaying history for every pair — this can take a minute.</div></div>';
+  try {
+    renderBacktest(await getJSON("/api/backtest"));
+  } catch (err) {
+    $("bt").innerHTML = `<div class="card"><div class="empty">Backtest failed: ${esc(err.message)}</div></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run on recent history";
+  }
+});
+
+refresh(false);
+setInterval(() => refresh(false), REFRESH_MS);
+setInterval(() => {
+  const stamp = $("stamp");
+  if (stamp && stamp.dataset.iso) stamp.textContent = "updated " + timeAgo(stamp.dataset.iso);
+}, 15000);
+</script>
+</body>
+</html>

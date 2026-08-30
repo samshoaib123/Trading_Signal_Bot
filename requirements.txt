@@ -1,0 +1,11 @@
+# Core dependencies — pinned for reproducible cloud builds.
+ccxt==4.5.76                 # Binance (and 100+ other venues) market data
+pandas==2.3.3                # OHLCV frames + indicator math
+numpy==2.3.5                 # pandas' numeric backend
+python-telegram-bot==22.8    # Telegram delivery (v20+ async API)
+python-dotenv==1.2.3         # .env loading for local development
+
+# Web dashboard (webserver.py). The bot itself runs without these; drop them if
+# you only want Telegram alerts.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4

@@ -1,0 +1,24 @@
+services:
+  signal-bot:
+    build: .
+    image: crypto-signal-bot:latest
+    container_name: crypto-signal-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Keep state on a named volume so restarts do not replay old signals.
+      STATE_FILE: /app/data/signal_state.json
+      HEARTBEAT_FILE: /app/data/heartbeat
+      TRACKER_FILE: /app/data/signal_outcomes.json
+      TZ: UTC
+    volumes:
+      - signal-state:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  signal-state:
