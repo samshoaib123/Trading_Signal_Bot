@@ -187,6 +187,7 @@ class TestScanOnce(unittest.TestCase):
         self.settings = replace(
             Settings(),
             state_file=os.path.join(self.tmpdir.name, "state.json"),
+            tracker_file=os.path.join(self.tmpdir.name, "outcomes.json"),
             fetch_backoff_seconds=0.0,
             symbols=["BTC/USDT"],
         )
@@ -309,6 +310,7 @@ class TestPartialDelivery(unittest.TestCase):
         self.settings = replace(
             Settings(),
             state_file=os.path.join(self.tmpdir.name, "state.json"),
+            tracker_file=os.path.join(self.tmpdir.name, "outcomes.json"),
             fetch_backoff_seconds=0.0,
         )
 
