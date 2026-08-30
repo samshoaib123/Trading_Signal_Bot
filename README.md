@@ -329,6 +329,7 @@ python main.py                     # 3. run for real
 | `--once` | Single scan then exit — handy for cron or a smoke test |
 | `--dry-run` | Scan normally but log Telegram messages instead of sending |
 | `--test-telegram` | Send one test message and exit |
+| `--find-chat-id` | List the chat ids that have messaged your bot (only the token is needed) |
 | `--preflight` | Check config, exchange, candles, indicators, state file and Telegram, print a report, exit |
 | `--backtest` | Replay history and print win rate / expectancy / profit factor per setup |
 | `--report` | Send the cumulative win/loss scoreboard to Telegram and exit |
@@ -428,9 +429,37 @@ Everything else behaves identically — the bot is exchange-agnostic through ccx
    conversation` error.
 3. Message **@userinfobot** to get your numeric user id. That is
    `TELEGRAM_CHAT_ID`.
-4. For a **group**: add the bot to the group, send any message there, then open
-   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` and read
-   `message.chat.id` — group ids start with `-100`.
+4. For a **group**: add the bot to the group and send any message there.
+
+Or let the bot find it for you — with the token set, message your bot once, then:
+
+```bash
+python main.py --find-chat-id
+```
+
+```
+Found 2 chat(s):
+
+  TELEGRAM_CHAT_ID=1234567890      private    Sam
+  TELEGRAM_CHAT_ID=-1001234567890  supergroup Signals Group
+```
+
+Copy the line for the chat you want alerts in. Telegram only reports a chat after
+it has received a message there, and drops updates older than 24 hours.
+
+### Hard-coding the values locally
+
+For a local machine or a VPS, the least fiddly option is a file:
+
+```bash
+cp local_config.example.py local_config.py   # then edit it
+```
+
+`local_config.py` is gitignored, so a hard-coded token cannot be pushed by
+accident. Any UPPERCASE name in it is applied as a default, and a real
+environment variable of the same name always wins — so the file changes nothing
+on Railway or GitHub Actions, where it is not deployed at all. Use their
+Variables / Secrets panels there.
 
 ---
 
@@ -716,12 +745,13 @@ indicators.py      RSI / MACD / Bollinger / ATR / EMA / SMA (+ pandas-ta backend
 strategies.py      Setup detection, ATR levels, confidence scoring, sizing
 notifier.py        Telegram HTML formatting and delivery with retries
 state.py           Atomic JSON state, deduplication rules, pruning
+local_config.example.py  Optional hard-coded settings (copy to local_config.py)
 tracker.py         Follows sent signals to their stop or target, keeps the score
 webserver.py       FastAPI dashboard: live market state, positions, backtest
 dashboard.html     The dashboard page (no build step, no framework)
 backtest.py        Historical replay with fees, per-setup performance report
 preflight.py       --preflight self-check with actionable failure hints
-tests/             179 unit and pipeline tests (no network required)
+tests/             189 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
@@ -743,7 +773,7 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-179 tests, no network needed. They cover indicator maths against hand-computed
+189 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt

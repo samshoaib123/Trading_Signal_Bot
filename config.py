@@ -17,9 +17,46 @@ from dotenv import load_dotenv
 
 # Load .env if present. override=False => real env vars take precedence, which
 # is what we want in the cloud where no .env file is shipped.
+LOG = logging.getLogger(__name__)
+
 load_dotenv(override=False)
 
-LOG = logging.getLogger(__name__)
+
+def _apply_local_config() -> None:
+    """Apply values hard-coded in an optional, gitignored ``local_config.py``.
+
+    Editing a Python file is the least fiddly way to get the bot running on your
+    own machine, but a hard-coded token in a tracked file is one push away from
+    being public. This reads a file git ignores instead, and only fills gaps -
+    a real environment variable of the same name always wins, so nothing here
+    can silently override Railway's Variables or a GitHub secret.
+    """
+    try:
+        import local_config  # noqa: PLC0415 - optional, may not exist
+    except ImportError:
+        return
+    except Exception as exc:  # noqa: BLE001 - a broken file must not kill the bot
+        LOG.warning("local_config.py could not be imported (%s); ignoring it", exc)
+        return
+
+    applied = []
+    for name in dir(local_config):
+        if not name.isupper() or name.startswith("_"):
+            continue
+        if os.environ.get(name):
+            continue                      # the real environment wins
+        value = getattr(local_config, name)
+        if value is None or callable(value):
+            continue
+        os.environ[name] = str(value)
+        applied.append(name)
+
+    if applied:
+        LOG.info("Applied %d setting(s) from local_config.py: %s",
+                 len(applied), ", ".join(sorted(applied)))
+
+
+_apply_local_config()
 
 DEFAULT_SYMBOLS = [
     "BTC/USDT",

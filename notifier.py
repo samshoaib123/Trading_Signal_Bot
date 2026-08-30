@@ -419,3 +419,61 @@ def format_scoreboard(ledger, settings=None) -> str:
             "information — do not increase your size to win it back.</i>"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Finding your chat id
+# ---------------------------------------------------------------------------
+async def _discover_chats_async(token: str):
+    """Ask Telegram which chats have messaged this bot recently."""
+    seen = {}
+    async with Bot(token) as bot:
+        for update in await bot.get_updates(timeout=10, allowed_updates=None):
+            message = (update.message or update.channel_post
+                       or update.edited_message or update.edited_channel_post)
+            if message is None or message.chat is None:
+                continue
+            chat = message.chat
+            name = (chat.title
+                    or " ".join(filter(None, [chat.first_name, chat.last_name]))
+                    or chat.username or "(no name)")
+            seen[chat.id] = {"id": chat.id, "type": chat.type, "name": name}
+    return list(seen.values())
+
+
+def discover_chats(settings) -> int:
+    """Print every chat id Telegram knows about for this bot.
+
+    Only the token is needed. Telegram only reports a chat once somebody has
+    messaged the bot there, which is why the instructions below come first.
+    """
+    if not settings.telegram_bot_token:
+        print("\nSet TELEGRAM_BOT_TOKEN first - the token alone is enough for this.\n")
+        return 2
+
+    print("\nBefore this can find anything:")
+    print("  1. Open your bot in Telegram and send it /start (or any message).")
+    print("  2. For a group: add the bot to the group and send a message there.")
+    print("Telegram only reports a chat once it has received something.\n")
+
+    try:
+        chats = asyncio.run(_discover_chats_async(settings.telegram_bot_token))
+    except (InvalidToken, Forbidden) as exc:
+        print(f"Telegram rejected the token: {exc}\n")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not reach Telegram: {exc}\n")
+        return 1
+
+    if not chats:
+        print("No chats found yet. Send your bot a message, then run this again.")
+        print("(Telegram also drops updates older than 24 hours.)\n")
+        return 1
+
+    print(f"Found {len(chats)} chat(s):\n")
+    width = max(len(str(c["id"])) for c in chats)
+    for chat in chats:
+        print(f"  TELEGRAM_CHAT_ID={str(chat['id']).ljust(width)}   "
+              f"{chat['type']:<10} {chat['name']}")
+    print("\nCopy the line for the chat you want alerts in.\n")
+    return 0

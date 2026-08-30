@@ -20,6 +20,7 @@ Usage::
     python main.py --preflight     # check everything at once before deploying
     python main.py --backtest      # how these setups actually performed on history
     python main.py --report        # send the running win/loss scoreboard
+    python main.py --find-chat-id  # print your chat id (needs only the token)
 """
 
 from __future__ import annotations
@@ -36,7 +37,8 @@ from typing import List
 from config import ConfigError, Settings, configure_logging, load_settings
 from exchange import ExchangeError, create_exchange, fetch_ohlcv, load_valid_symbols
 from indicators import calculate_indicators, resolve_backend
-from notifier import TelegramNotifier, format_outcome, format_scoreboard
+from notifier import (TelegramNotifier, discover_chats, format_outcome,
+                      format_scoreboard)
 from backtest import run_backtest
 from preflight import run_preflight
 from state import load_state, prune_state, record_signal, save_state, should_send
@@ -210,6 +212,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="log Telegram messages instead of sending them")
     parser.add_argument("--test-telegram", action="store_true",
                         help="send a test message and exit")
+    parser.add_argument("--find-chat-id", action="store_true",
+                        help="list the chat ids that have messaged your bot "
+                             "(only the token is needed)")
     parser.add_argument("--report", action="store_true",
                         help="send the cumulative win/loss scoreboard and exit")
     parser.add_argument("--backtest", action="store_true",
@@ -230,6 +235,9 @@ def main(argv=None) -> int:
 
     if args.preflight:
         return run_preflight(settings, TelegramNotifier(settings, dry_run=args.dry_run))
+
+    if args.find_chat_id:
+        return discover_chats(settings)
 
     if args.backtest:
         # No Telegram credentials needed: this only reads public candles.
