@@ -20,7 +20,7 @@ on:
         description: "What to run"
         type: choice
         default: scan
-        options: [scan, preflight, dry-run]
+        options: [scan, preflight, dry-run, find-chat-id]
 
 # Never let a slow run overlap the next scheduled one.
 concurrency:
@@ -72,6 +72,7 @@ jobs:
       - name: Run
         run: |
           case "${{ inputs.mode || 'scan' }}" in
+            find-chat-id) python main.py --find-chat-id ;;
             preflight) python main.py --preflight ;;
             dry-run)   python main.py --once --dry-run ;;
             *)         python main.py --once ;;
