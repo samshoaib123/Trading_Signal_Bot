@@ -97,8 +97,29 @@ def format_signal(signal: Signal, settings=None) -> str:
         f"<b>Entry:</b> <code>{format_price(signal.entry)}</code>",
         f"<b>Stop Loss:</b> <code>{format_price(signal.stop_loss)}</code> "
         f"({_pct(signal.entry, signal.stop_loss)})",
-        f"<b>Take Profit:</b> <code>{format_price(signal.take_profit)}</code> "
-        f"({_pct(signal.entry, signal.take_profit)})",
+    ]
+
+    if len(signal.targets) > 1:
+        # A scaled exit is a plan, not a price. Showing only the final rung
+        # would make the trade look far less likely to pay than it is, and
+        # showing the ladder without its fractions would not say what to do.
+        lines.append("<b>Targets:</b>")
+        for n, (target, fraction, r) in enumerate(
+            zip(signal.targets, signal.target_fractions,
+                signal.target_r_multiples), start=1
+        ):
+            lines.append(
+                f"  TP{n} <code>{format_price(target)}</code> "
+                f"({_pct(signal.entry, target)}, {r:.1f}R) "
+                f"— close {fraction * 100:.0f}%"
+            )
+    else:
+        lines.append(
+            f"<b>Take Profit:</b> <code>{format_price(signal.take_profit)}</code> "
+            f"({_pct(signal.entry, signal.take_profit)})"
+        )
+
+    lines += [
         f"<b>Risk : Reward:</b> 1 : {signal.risk_reward:.2f}",
         f"<b>Timeframe:</b> {esc(signal.timeframe)}",
         f"<b>Candle close:</b> "

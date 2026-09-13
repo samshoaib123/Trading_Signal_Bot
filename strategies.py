@@ -39,6 +39,16 @@ SETUP_LABELS = {
     "rsi_reversal": "RSI Reversal",
     "macd_crossover": "MACD Crossover",
     "bb_breakout": "Bollinger Bands Breakout",
+    "trend_sniper": "Trend Sniper",
+}
+
+# Columns a setup needs on top of REQUIRED_COLUMNS. Checked per setup rather
+# than globally so one setup's warm-up cannot silence the others.
+SETUP_REQUIREMENTS: Dict[str, tuple] = {
+    "trend_sniper": (
+        "adx", "plus_di", "minus_di", "stochrsi_k", "stochrsi_d",
+        "ribbon_width", "bb_bandwidth",
+    ),
 }
 
 MAX_CONFIDENCE = 3
@@ -86,6 +96,25 @@ class Signal:
     position_size: Optional[float] = None
     position_notional: Optional[float] = None
     risk_amount: Optional[float] = None
+    # Scaled take-profits, nearest first. Single-target setups carry exactly one
+    # entry, equal to ``take_profit``, so everything downstream has one shape to
+    # handle instead of two.
+    targets: List[float] = field(default_factory=list)
+    target_fractions: List[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.targets:
+            self.targets = [self.take_profit]
+        if not self.target_fractions:
+            self.target_fractions = [1.0] * len(self.targets)
+
+    @property
+    def target_r_multiples(self) -> List[float]:
+        """Each target's distance from entry, in units of the risk taken."""
+        risk = abs(self.entry - self.stop_loss)
+        if risk <= 0:
+            return [0.0] * len(self.targets)
+        return [abs(t - self.entry) / risk for t in self.targets]
 
     @property
     def setup_label(self) -> str:
@@ -132,6 +161,8 @@ class Signal:
             "entry": self.entry,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
+            "targets": list(self.targets),
+            "target_fractions": list(self.target_fractions),
             "atr": self.atr,
             "confidence": self.confidence,
             "confirmations": list(self.confirmations),
@@ -212,10 +243,70 @@ def _detect_bb_breakout(curr: pd.Series, prev: pd.Series, settings) -> Optional[
     return None
 
 
+def _detect_trend_sniper(curr: pd.Series, prev: pd.Series, settings) -> Optional[str]:
+    """A squeeze releasing in the direction the ribbon and momentum agree on.
+
+    Every other setup here fires on one condition. This one requires four to
+    line up on the same candle, because each covers a different way the others
+    fail:
+
+    1. **The squeeze released this candle.** Volatility was compressed inside
+       the Keltner channels and has just expanded. That is the timing leg: it
+       enters at the break rather than somewhere inside the range. It must be
+       the *release*, not the squeeze itself, or you buy the middle of a range
+       and wait.
+    2. **The EMA ribbon is stacked and open** in the trade's direction — every
+       fast EMA on the right side of every slow one, with the fan wide enough
+       to be a trend rather than noise that happened to line up.
+    3. **ADX is trending.** A squeeze release into a directionless market is
+       how breakout systems bleed. Below the threshold there is no setup here
+       however good the rest looks.
+    4. **Momentum agrees**, from two independent readings: MACD's histogram on
+       the right side of zero, and Stoch-RSI not already exhausted at the far
+       end of its range. Entering a breakout that has already run is the
+       expensive version of being right.
+
+    +DI / -DI break the direction tie, so a bullish ribbon with bearish
+    directional movement produces nothing rather than a coin flip.
+    """
+    needed = ("adx", "plus_di", "minus_di", "stochrsi_k", "macd_hist", "ribbon_width")
+    if not all(_is_number(curr.get(c)) for c in needed):
+        return None
+
+    released = bool(curr.get("squeeze_off"))
+    if not released:
+        return None
+
+    if curr["adx"] < settings.adx_trending:
+        return None
+
+    bull_ribbon = bool(curr.get("ribbon_bull"))
+    bear_ribbon = bool(curr.get("ribbon_bear"))
+
+    if bull_ribbon and not bear_ribbon:
+        if (
+            curr["plus_di"] > curr["minus_di"]
+            and curr["macd_hist"] > 0
+            and curr["stochrsi_k"] < settings.stoch_rsi_overbought
+        ):
+            return BUY
+        return None
+
+    if bear_ribbon and not bull_ribbon:
+        if (
+            curr["minus_di"] > curr["plus_di"]
+            and curr["macd_hist"] < 0
+            and curr["stochrsi_k"] > settings.stoch_rsi_oversold
+        ):
+            return SELL
+    return None
+
+
 DETECTORS: Dict[str, Callable[[pd.Series, pd.Series, object], Optional[str]]] = {
     "rsi_reversal": _detect_rsi_reversal,
     "macd_crossover": _detect_macd_crossover,
     "bb_breakout": _detect_bb_breakout,
+    "trend_sniper": _detect_trend_sniper,
 }
 
 
@@ -258,6 +349,13 @@ def _rsi_has_room(curr: pd.Series, side: str, settings) -> Optional[bool]:
     )
 
 
+def _adx_strong(curr: pd.Series, settings) -> Optional[bool]:
+    """ADX well clear of the trending threshold, not merely across it."""
+    if not _is_number(curr.get("adx")):
+        return None
+    return bool(curr["adx"] >= settings.adx_trending * 1.4)
+
+
 def score_confidence(
     setup: str, side: str, curr: pd.Series, prev: pd.Series, settings
 ) -> tuple[int, List[str]]:
@@ -286,6 +384,17 @@ def score_confidence(
             (trend_label, _trend_aligned(curr, side)),
             ("MACD momentum turning", _momentum_aligned(curr, prev, side)),
         )
+    elif setup == "trend_sniper":
+        # The trigger already demands the ribbon, ADX and MACD, so scoring them
+        # again would award points for what the setup guarantees. These three
+        # are genuinely extra: the 200-EMA is a horizon the ribbon does not
+        # reach, participation is independent of price, and a strongly trending
+        # ADX is a different claim from merely clearing the threshold.
+        checks = (
+            (trend_label, _trend_aligned(curr, side)),
+            ("Volume spike", _volume_spike(curr, settings)),
+            ("ADX strongly trending", _adx_strong(curr, settings)),
+        )
     elif setup == "macd_crossover":
         checks = (
             ("Volume spike", _volume_spike(curr, settings)),
@@ -313,6 +422,48 @@ def build_levels(side: str, entry: float, atr_value: float, settings) -> tuple[f
     if side == BUY:
         return entry - sl_distance, entry + tp_distance
     return entry + sl_distance, entry - tp_distance
+
+
+def build_targets(side: str, entry: float, atr_value: float, settings) -> tuple:
+    """Return ``(targets, fractions)`` for a scaled exit.
+
+    A single target forces one decision to be right twice: near enough to be
+    reached often, far enough to pay for the trades that miss. A ladder splits
+    that — the near targets bank something on the moves that stall, the far one
+    pays for the stops, and the stop moves to break-even once the first is in.
+
+    Fractions are normalised to sum to 1: a ladder that closes 90% of the
+    position leaves a remainder that would never be accounted for, and one that
+    closes 110% would double-count. Mismatched lengths fall back to a single
+    target rather than silently trading a different ladder than configured.
+    """
+    multipliers = list(settings.tp_atr_multipliers)
+    fractions = list(settings.tp_close_fractions)
+
+    if not multipliers:
+        _, take_profit = build_levels(side, entry, atr_value, settings)
+        return [take_profit], [1.0]
+
+    if len(fractions) != len(multipliers):
+        LOG.error(
+            "TP_CLOSE_FRACTIONS has %d entries but TP_ATR_MULTIPLIERS has %d; "
+            "falling back to a single target so the ladder is not silently "
+            "half-applied", len(fractions), len(multipliers),
+        )
+        _, take_profit = build_levels(side, entry, atr_value, settings)
+        return [take_profit], [1.0]
+
+    total = sum(fractions)
+    if total <= 0:
+        LOG.error("TP_CLOSE_FRACTIONS sums to %s; using an equal split", total)
+        fractions = [1.0 / len(multipliers)] * len(multipliers)
+    elif abs(total - 1.0) > 1e-9:
+        LOG.warning("TP_CLOSE_FRACTIONS sums to %.3f, normalising to 1.0", total)
+        fractions = [f / total for f in fractions]
+
+    sign = 1.0 if side == BUY else -1.0
+    targets = [entry + sign * m * atr_value for m in multipliers]
+    return targets, fractions
 
 
 def position_size(entry: float, stop_loss: float, settings) -> tuple[float, float, float]:
@@ -377,6 +528,15 @@ def detect_signals(symbol: str, df: pd.DataFrame, settings) -> List[Signal]:
             LOG.warning("Unknown setup %r in ENABLED_SETUPS, ignoring", setup)
             continue
 
+        extra = SETUP_REQUIREMENTS.get(setup, ())
+        if extra and not all(_is_number(curr.get(c)) for c in extra):
+            # Checked per setup, not globally: the sniper's indicators warm up
+            # far later than RSI's, and a global check would mute every setup
+            # until the slowest one was ready.
+            LOG.debug("%s/%s: setup-specific indicators still warming up",
+                      symbol, setup)
+            continue
+
         side = detector(curr, prev, settings)
         if side is None:
             continue
@@ -384,7 +544,16 @@ def detect_signals(symbol: str, df: pd.DataFrame, settings) -> List[Signal]:
         entry = float(curr["close"])
         atr_value = float(curr["atr"])
         stop_loss, take_profit = build_levels(side, entry, atr_value, settings)
-        if stop_loss <= 0 or take_profit <= 0:
+        targets, fractions = (
+            build_targets(side, entry, atr_value, settings)
+            if setup == "trend_sniper"
+            else ([take_profit], [1.0])
+        )
+        if setup == "trend_sniper":
+            # The ladder is the plan; take_profit stays the single number every
+            # existing consumer already understands, set to the final rung.
+            take_profit = targets[-1]
+        if stop_loss <= 0 or take_profit <= 0 or any(t <= 0 for t in targets):
             LOG.warning(
                 "%s/%s: ATR %.6f produced a non-positive level, skipping",
                 symbol,
@@ -417,6 +586,8 @@ def detect_signals(symbol: str, df: pd.DataFrame, settings) -> List[Signal]:
             candle_time=candle_time,
             confidence=confidence,
             confirmations=confirmations,
+            targets=targets,
+            target_fractions=fractions,
         )
 
         if settings.show_position_size and settings.capital > 0:

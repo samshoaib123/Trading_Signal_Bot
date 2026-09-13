@@ -54,6 +54,14 @@ class Outcome:
     opened_at: str
     closed_at: str
     candles_held: int
+    targets_hit: int = 0
+    targets_total: int = 1
+    # True when the stop that closed the trade had already been moved to
+    # break-even by an earlier target. Reported separately because "stopped out
+    # at entry after banking two targets" is a very different trade from
+    # "stopped out for a full R", and lumping them together hides which one the
+    # strategy actually produces.
+    stopped_at_breakeven: bool = False
 
     @property
     def setup_label(self) -> str:
@@ -137,6 +145,8 @@ def track_signal(signal: Signal, ledger: Dict[str, list], settings) -> None:
             "entry": signal.entry,
             "stop_loss": signal.stop_loss,
             "take_profit": signal.take_profit,
+            "targets": list(signal.targets),
+            "target_fractions": list(signal.target_fractions),
             "confidence": signal.confidence,
             "opened_at": signal.candle_time.isoformat(),
         }
@@ -192,37 +202,105 @@ def resolve_open(
     return resolved
 
 
+def _ladder(pos: dict) -> Tuple[List[float], List[float]]:
+    """The position's targets and close fractions, normalised.
+
+    Positions recorded before scaled exits existed carry only ``take_profit``,
+    so they read back as a one-rung ladder and walk exactly as they used to.
+    """
+    targets = [float(t) for t in (pos.get("targets") or [pos["take_profit"]])]
+    fractions = [float(f) for f in (pos.get("target_fractions") or [])]
+    if len(fractions) != len(targets):
+        fractions = [1.0 / len(targets)] * len(targets)
+    total = sum(fractions)
+    if total > 0 and abs(total - 1.0) > 1e-9:
+        fractions = [f / total for f in fractions]
+    return targets, fractions
+
+
 def _walk(pos: dict, future: pd.DataFrame, settings) -> Optional[Outcome]:
-    """Return the outcome if this position resolved inside ``future``."""
+    """Return the outcome if this position resolved inside ``future``.
+
+    Walks the target ladder rung by rung. Each target reached books its own
+    fraction of the position at that target's R, and the remainder rides on.
+    Once ``BREAKEVEN_AFTER_TARGET`` rungs are in, the stop moves to entry, so a
+    trade that ran and then reversed gives back what is left rather than a full
+    R — which is the entire point of scaling out, and the reason the realised
+    result is a weighted sum rather than a single number.
+
+    The stop still wins ties inside a candle, exactly as in the backtest: with
+    no tick data, assuming the favourable order would flatter the record.
+    """
     entry = float(pos["entry"])
     stop = float(pos["stop_loss"])
-    target = float(pos["take_profit"])
     side = pos["side"]
 
     risk = abs(entry - stop)
     if risk <= 0:
         return None
-    target_r = abs(target - entry) / risk
+
+    targets, fractions = _ladder(pos)
+    target_rs = [abs(t - entry) / risk for t in targets]
     fee_r = _fee_r_cost(entry, stop, settings.fee_percent)
+    breakeven_after = int(getattr(settings, "breakeven_after_target", 0) or 0)
+
+    remaining = 1.0
+    realised = 0.0
+    hit = 0
+    at_breakeven = False
 
     for held, (ts, row) in enumerate(future.iterrows(), start=1):
         if side == BUY:
             hit_stop = row["low"] <= stop
-            hit_target = row["high"] >= target
         else:
             hit_stop = row["high"] >= stop
-            hit_target = row["low"] <= target
 
-        # The stop wins ties, exactly as in the backtest.
         if hit_stop:
-            return _outcome(pos, stop, LOSS, -1.0 - fee_r, ts, held)
-        if hit_target:
-            return _outcome(pos, target, WIN, target_r - fee_r, ts, held)
+            # -1R against the original stop, 0R once it has been moved up.
+            stop_r = 0.0 if at_breakeven else -1.0
+            realised += remaining * stop_r
+            total_r = realised - fee_r
+            return _outcome(
+                pos, stop, WIN if total_r > 0 else LOSS, total_r, ts, held,
+                targets_hit=hit, targets_total=len(targets),
+                stopped_at_breakeven=at_breakeven,
+            )
 
+        # Several rungs can fall inside one candle; book them in order.
+        while hit < len(targets):
+            target = targets[hit]
+            reached = row["high"] >= target if side == BUY else row["low"] <= target
+            if not reached:
+                break
+            realised += fractions[hit] * target_rs[hit]
+            remaining -= fractions[hit]
+            hit += 1
+            if breakeven_after and hit >= breakeven_after and not at_breakeven:
+                stop = entry
+                at_breakeven = True
+
+        if hit >= len(targets) or remaining <= 1e-9:
+            total_r = realised - fee_r
+            return _outcome(
+                pos, targets[-1], WIN if total_r > 0 else LOSS, total_r, ts, held,
+                targets_hit=hit, targets_total=len(targets),
+            )
+
+    # Still running. Record the progress for display only, under keys the walk
+    # never reads back: every scan replays the whole history from the signal
+    # candle, so the rungs and the break-even move are re-derived deterministically.
+    # Writing the moved stop back into ``stop_loss`` would be a silent trap —
+    # once it equalled entry the risk would read as zero and the position could
+    # never resolve again.
+    pos["targets_hit"] = hit
+    pos["open_r"] = round(realised, 4)
+    pos["stop_now"] = stop
+    pos["at_breakeven"] = at_breakeven
     return None
 
 
-def _outcome(pos, exit_price, result, r, ts, held) -> Outcome:
+def _outcome(pos, exit_price, result, r, ts, held, targets_hit=0,
+             targets_total=1, stopped_at_breakeven=False) -> Outcome:
     return Outcome(
         symbol=pos["symbol"], setup=pos["setup"], side=pos["side"],
         entry=float(pos["entry"]), exit_price=float(exit_price),
@@ -230,6 +308,8 @@ def _outcome(pos, exit_price, result, r, ts, held) -> Outcome:
         opened_at=pos["opened_at"],
         closed_at=ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
         candles_held=held,
+        targets_hit=targets_hit, targets_total=targets_total,
+        stopped_at_breakeven=stopped_at_breakeven,
     )
 
 
