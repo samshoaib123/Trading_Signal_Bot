@@ -27,6 +27,7 @@ import os
 import secrets
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -120,6 +121,71 @@ def _num(value) -> Optional[float]:
         return None
 
 
+# The context panel is four fetches per pair, and its answer changes on the
+# hour, not the minute. Cached far longer than the market snapshot.
+CONTEXT_CACHE_SECONDS = 300
+_CONTEXT_CACHE: Dict[str, Dict[str, Any]] = {}
+_CONTEXT_LOCK = threading.Lock()
+
+
+def _context_cache_get(pair: str) -> Optional[Dict[str, Any]]:
+    with _CONTEXT_LOCK:
+        entry = _CONTEXT_CACHE.get(pair)
+        if entry and (time.time() - entry["at"]) < CONTEXT_CACHE_SECONDS:
+            return {**entry["payload"], "cached": True}
+    return None
+
+
+def _context_cache_put(pair: str, payload: Dict[str, Any]) -> None:
+    with _CONTEXT_LOCK:
+        _CONTEXT_CACHE[pair] = {"at": time.time(), "payload": payload}
+
+
+def _bias(row) -> str:
+    """Directional read for one timeframe: the ribbon, then the trend EMA.
+
+    Falls back to the 200-EMA because the ribbon needs 55 candles and a daily
+    frame may not have them — and "unknown" on the daily would drop the panel
+    to three opinions without saying why.
+    """
+    ribbon = _ribbon_state(row)
+    if ribbon in ("bull", "bear"):
+        return ribbon
+    close, trend_ema = _num(row.get("close")), _num(row.get("trend_ema"))
+    if close is None or trend_ema is None:
+        return "unknown"
+    return "bull" if close > trend_ema else "bear"
+
+
+def _flag(value) -> Optional[bool]:
+    """A pandas boolean that may still be NaN during warm-up."""
+    if value is None or value != value:       # NaN
+        return None
+    return bool(value)
+
+
+def _adx_state(value: Optional[float]) -> str:
+    """ADX as a word, matching the thresholds the sniper setup gates on."""
+    if value is None:
+        return "unknown"
+    if value >= SETTINGS.adx_trending:
+        return "trending"
+    if value >= SETTINGS.adx_building:
+        return "building"
+    return "flat"
+
+
+def _ribbon_state(row) -> str:
+    bull, bear = _flag(row.get("ribbon_bull")), _flag(row.get("ribbon_bear"))
+    if bull is None and bear is None:
+        return "unknown"
+    if bull:
+        return "bull"
+    if bear:
+        return "bear"
+    return "mixed"
+
+
 def build_snapshot() -> Dict[str, Any]:
     """Fetch every watched pair and describe its current state."""
     rows: List[Dict[str, Any]] = []
@@ -180,6 +246,15 @@ def build_snapshot() -> Dict[str, Any]:
                 "volume_ratio": (
                     (volume / volume_sma) if volume and volume_sma else None
                 ),
+                "adx": _num(last.get("adx")),
+                "adx_state": _adx_state(_num(last.get("adx"))),
+                "plus_di": _num(last.get("plus_di")),
+                "minus_di": _num(last.get("minus_di")),
+                "stochrsi_k": _num(last.get("stochrsi_k")),
+                "squeeze": _flag(last.get("squeeze_on")),
+                "squeeze_released": _flag(last.get("squeeze_off")),
+                "ribbon": _ribbon_state(last),
+                "ribbon_width": _num(last.get("ribbon_width")),
                 "signals": live,
             })
         except Exception as exc:  # noqa: BLE001 - one bad pair must not blank the page
@@ -242,6 +317,106 @@ def api_market(refresh: bool = Query(False, description="bypass the cache")) -> 
     return cached_snapshot(force=refresh)
 
 
+@app.get("/api/context")
+def api_context(symbol: str = Query("", description="pair; defaults to the first")
+                ) -> Dict[str, Any]:
+    """Higher-timeframe bias for one pair — the multi-timeframe context panel.
+
+    One symbol at a time, and cached hard. A 15m read says nothing about whether
+    you are leaning into the daily; four timeframes do. But it is four fetches
+    per pair, so doing every pair on every poll would spend the rate limit on a
+    panel that changes on the hour.
+    """
+    pair = symbol or (SYMBOLS[0] if SYMBOLS else "")
+    if pair not in SYMBOLS:
+        raise HTTPException(status_code=404, detail=f"{pair!r} is not watched")
+
+    cached = _context_cache_get(pair)
+    if cached is not None:
+        return cached
+
+    rows, aligned, counted = [], 0, 0
+    for timeframe in SETTINGS.context_timeframes:
+        row = {"timeframe": timeframe, "bias": "unknown", "adx": None,
+               "adx_state": "unknown"}
+        try:
+            frame = fetch_ohlcv(EXCHANGE, pair, replace(SETTINGS, timeframe=timeframe))
+            if frame is not None and not frame.empty:
+                last = calculate_indicators(frame, SETTINGS).iloc[-1]
+                row["bias"] = _bias(last)
+                row["adx"] = _num(last.get("adx"))
+                row["adx_state"] = _adx_state(row["adx"])
+        except Exception as exc:  # noqa: BLE001 - one timeframe must not blank the panel
+            LOG.warning("%s %s: context fetch failed (%s)", pair, timeframe, exc)
+        if row["bias"] in ("bull", "bear"):
+            counted += 1
+        rows.append(row)
+
+    # "Aligned" means the timeframes that have an opinion all share it. A 2/4
+    # that is two bulls and two bears is not half-aligned, it is a disagreement.
+    opinions = {r["bias"] for r in rows if r["bias"] in ("bull", "bear")}
+    if len(opinions) == 1 and counted:
+        aligned, verdict = counted, f"leaning {opinions.pop()}"
+    elif counted:
+        verdict = "mixed"
+    else:
+        verdict = "unknown"
+
+    highest = rows[-1] if rows else {}
+    payload = {
+        "symbol": pair,
+        "timeframes": rows,
+        "aligned": aligned,
+        "total": len(rows),
+        "verdict": verdict,
+        "adx": highest.get("adx"),
+        "adx_state": highest.get("adx_state"),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _context_cache_put(pair, payload)
+    return payload
+
+
+@app.get("/api/account")
+def api_account() -> Dict[str, Any]:
+    """MetaTrader 5 account and live broker positions, when execution is on.
+
+    Reports ``enabled: false`` rather than an error when it is off: alert-only
+    is a supported way to run this, not a broken one, and the board has to say
+    which mode it is in without pretending there is a balance.
+    """
+    if not SETTINGS.mt5_enabled:
+        return {"enabled": False, "connected": False,
+                "reason": "MT5_ENABLED is off — alerts only"}
+
+    from broker_mt5 import MT5Broker, MT5Error  # noqa: PLC0415 - optional path
+
+    try:
+        broker = MT5Broker(SETTINGS)
+        summary = broker.account_summary()
+        positions = [
+            {"ticket": getattr(p, "ticket", None), "symbol": getattr(p, "symbol", ""),
+             "volume": _num(getattr(p, "volume", None)),
+             "price_open": _num(getattr(p, "price_open", None)),
+             "profit": _num(getattr(p, "profit", None)),
+             "side": "BUY" if getattr(p, "type", 0) == 0 else "SELL"}
+            for p in broker.open_positions()
+        ]
+        broker.shutdown()
+    except MT5Error as exc:
+        return {"enabled": True, "connected": False, "reason": str(exc)}
+
+    floating = sum(p["profit"] or 0.0 for p in positions)
+    return {
+        "enabled": True, "connected": True, **summary,
+        "positions": positions,
+        "floating_pl": floating,
+        "dry_run": SETTINGS.mt5_dry_run,
+        "min_confidence": SETTINGS.mt5_min_confidence,
+        "max_open_positions": SETTINGS.mt5_max_open_positions,
+    }
+
+
 @app.get("/api/positions")
 def api_positions() -> Dict[str, Any]:
     """Open tracked positions, marked to the latest cached price."""
@@ -253,11 +428,39 @@ def api_positions() -> Dict[str, Any]:
         price = prices.get(pos["symbol"])
         entry = float(pos["entry"])
         risk = abs(entry - float(pos["stop_loss"]))
-        unrealised = None
+        targets = [float(t) for t in (pos.get("targets") or [pos["take_profit"]])]
+        fractions = [float(f) for f in (pos.get("target_fractions") or [1.0])]
+        hit = int(pos.get("targets_hit", 0))
+        banked = float(pos.get("open_r") or 0.0)
+
+        # Only the part of the position that is still on rides the current
+        # price. Marking the whole size to market after two rungs have closed
+        # would report a P/L the trade cannot actually make or lose.
+        remaining = max(0.0, 1.0 - sum(fractions[:hit]))
+        excursion = None
         if price and risk > 0:
             move = (price - entry) if pos["side"] == BUY else (entry - price)
-            unrealised = move / risk           # in R, before fees
-        out.append({**pos, "price": price, "unrealised_r": unrealised})
+            excursion = move / risk            # in R, before fees
+        live = None if excursion is None else banked + remaining * excursion
+        out.append({
+            **pos,
+            "price": price,
+            "excursion_r": excursion,
+            "live_r": live,
+            "remaining_fraction": remaining,
+            "targets": targets,
+            "targets_total": len(targets),
+            "targets_hit": int(pos.get("targets_hit", 0)),
+            "next_target": (
+                targets[int(pos.get("targets_hit", 0))]
+                if int(pos.get("targets_hit", 0)) < len(targets) else None
+            ),
+            "banked_r": banked,
+            "peak_r": pos.get("peak_r"),
+            "at_breakeven": bool(pos.get("at_breakeven")),
+            "bars_held": pos.get("bars_held"),
+            "stop_now": pos.get("stop_now", pos.get("stop_loss")),
+        })
 
     return {"open": out, "count": len(out)}
 

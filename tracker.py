@@ -248,8 +248,17 @@ def _walk(pos: dict, future: pd.DataFrame, settings) -> Optional[Outcome]:
     realised = 0.0
     hit = 0
     at_breakeven = False
+    peak_r = 0.0
+    held = 0
 
     for held, (ts, row) in enumerate(future.iterrows(), start=1):
+        # Best the trade ever looked, in R. Worth recording separately from the
+        # result: a setup that repeatedly runs to 2R and closes at 0 is a exit
+        # problem, not an entry problem, and the closed P/L alone hides that.
+        best = row["high"] if side == BUY else row["low"]
+        excursion = (best - entry) / risk * (1.0 if side == BUY else -1.0)
+        peak_r = max(peak_r, realised + remaining * excursion)
+
         if side == BUY:
             hit_stop = row["low"] <= stop
         else:
@@ -294,8 +303,10 @@ def _walk(pos: dict, future: pd.DataFrame, settings) -> Optional[Outcome]:
     # never resolve again.
     pos["targets_hit"] = hit
     pos["open_r"] = round(realised, 4)
+    pos["peak_r"] = round(peak_r, 4)
     pos["stop_now"] = stop
     pos["at_breakeven"] = at_breakeven
+    pos["bars_held"] = held
     return None
 
 
