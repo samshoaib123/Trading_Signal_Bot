@@ -1,0 +1,13 @@
+# Optional: MetaTrader 5 order execution (broker_mt5.py).
+#
+#   pip install -r requirements-mt5.txt
+#   set MT5_ENABLED=true
+#
+# WINDOWS ONLY. The MetaTrader5 package is a thin wrapper over the terminal's
+# IPC API, and that terminal is a Windows application — there is no Linux or
+# macOS wheel, and the pip install will simply fail elsewhere. That is why this
+# file is separate from requirements.txt: the bot's alerting half runs anywhere,
+# including the Docker image and Railway, and only execution needs Windows.
+#
+# Running under Wine works for some people and is not supported here.
+MetaTrader5==5.0.5260 ; sys_platform == "win32"

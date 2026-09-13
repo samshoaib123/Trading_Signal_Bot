@@ -11,9 +11,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 from dotenv import load_dotenv
+
+from broker_mt5 import parse_symbol_map
 
 # Load .env if present. override=False => real env vars take precedence, which
 # is what we want in the cloud where no .env file is shipped.
@@ -57,6 +59,10 @@ def _apply_local_config() -> None:
 
 
 _apply_local_config()
+
+# Signals score 1-3; mirrored here so require_mt5() can reject an
+# unreachable threshold without importing strategies (which imports pandas).
+MAX_SIGNAL_CONFIDENCE = 3
 
 DEFAULT_SYMBOLS = [
     "BTC/USDT",
@@ -162,6 +168,27 @@ class Settings:
         default_factory=lambda: ["rsi_reversal", "macd_crossover", "bb_breakout"]
     )
 
+    # --- MetaTrader 5 execution -------------------------------------------
+    # Off by default. See broker_mt5.py for why this is the only module that
+    # can move money, and what guards it.
+    mt5_enabled: bool = False
+    mt5_allow_live: bool = False
+    mt5_dry_run: bool = False
+    mt5_login: int = 0
+    mt5_password: str = ""
+    mt5_server: str = ""
+    mt5_path: str = ""
+    mt5_symbol_map: Dict[str, str] = field(default_factory=dict)
+    mt5_symbol_suffix: str = ""
+    mt5_magic: int = 907001
+    mt5_deviation_points: int = 20
+    mt5_filling_mode: str = ""
+    mt5_max_open_positions: int = 3
+    mt5_max_orders_per_day: int = 10
+    mt5_max_lot: float = 0.0
+    mt5_min_confidence: int = 2
+    mt5_execution_file: str = "mt5_executions.json"
+
     # --- Scheduling / state ----------------------------------------------
     poll_interval_minutes: int = 15
     candle_close_buffer_seconds: int = 15
@@ -195,6 +222,38 @@ class Settings:
                 + ", ".join(missing)
                 + ". Copy .env.example to .env (local) or set them in your host's "
                 "variables panel (Railway / systemd / docker-compose)."
+            )
+
+    def require_mt5(self) -> None:
+        """Fail fast when MT5 execution is on but under-configured.
+
+        A blank login is legitimate - it means "use whatever account the running
+        terminal is already logged into" - but a partial set of credentials is
+        always a mistake, and one that silently trades the wrong account.
+        """
+        if not self.mt5_enabled:
+            return
+        provided = [
+            name
+            for name, value in (
+                ("MT5_LOGIN", self.mt5_login),
+                ("MT5_PASSWORD", self.mt5_password),
+                ("MT5_SERVER", self.mt5_server),
+            )
+            if value
+        ]
+        if provided and len(provided) != 3:
+            missing = {"MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER"} - set(provided)
+            raise ConfigError(
+                "MT5_ENABLED is on with an incomplete login: "
+                + ", ".join(sorted(missing))
+                + " not set. Either set all three, or clear all three to trade "
+                "the account the terminal is already logged into."
+            )
+        if self.mt5_min_confidence > MAX_SIGNAL_CONFIDENCE:
+            raise ConfigError(
+                f"MT5_MIN_CONFIDENCE={self.mt5_min_confidence} can never be met; "
+                f"signals score at most {MAX_SIGNAL_CONFIDENCE}."
             )
 
 
@@ -237,6 +296,24 @@ def load_settings() -> Settings:
                 "ENABLED_SETUPS", ["rsi_reversal", "macd_crossover", "bb_breakout"]
             )
         ],
+        mt5_enabled=_get_bool("MT5_ENABLED", False),
+        mt5_allow_live=_get_bool("MT5_ALLOW_LIVE", False),
+        mt5_dry_run=_get_bool("MT5_DRY_RUN", False),
+        mt5_login=_get_int("MT5_LOGIN", 0),
+        mt5_password=_get_str("MT5_PASSWORD"),
+        mt5_server=_get_str("MT5_SERVER"),
+        mt5_path=_get_str("MT5_PATH"),
+        mt5_symbol_map=parse_symbol_map(_get_str("MT5_SYMBOL_MAP")),
+        mt5_symbol_suffix=_get_str("MT5_SYMBOL_SUFFIX"),
+        mt5_magic=_get_int("MT5_MAGIC", 907001),
+        mt5_deviation_points=_get_int("MT5_DEVIATION_POINTS", 20),
+        mt5_filling_mode=_get_str("MT5_FILLING_MODE").upper(),
+        mt5_max_open_positions=_get_int("MT5_MAX_OPEN_POSITIONS", 3),
+        mt5_max_orders_per_day=_get_int("MT5_MAX_ORDERS_PER_DAY", 10),
+        mt5_max_lot=_get_float("MT5_MAX_LOT", 0.0),
+        mt5_min_confidence=_get_int("MT5_MIN_CONFIDENCE", 2),
+        mt5_execution_file=_get_str("MT5_EXECUTION_FILE", "mt5_executions.json")
+        or "mt5_executions.json",
         poll_interval_minutes=_get_int("POLL_INTERVAL_MINUTES", 15),
         candle_close_buffer_seconds=_get_int("CANDLE_CLOSE_BUFFER_SECONDS", 15),
         state_file=_get_str("STATE_FILE", "signal_state.json") or "signal_state.json",

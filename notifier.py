@@ -383,6 +383,34 @@ def format_outcome(outcome, ledger=None) -> str:
     return "\n".join(lines)
 
 
+def format_execution(execution) -> str:
+    """Confirm a filled MetaTrader 5 order.
+
+    Slippage is shown explicitly rather than folded into the fill price: the gap
+    between the signal's entry and the broker's fill is the single most useful
+    number for deciding whether a setup survives contact with a real spread.
+    """
+    esc = html.escape
+    slippage = execution.filled_price - execution.requested_price
+    lines = [
+        f"\U0001f916 <b>MT5 order filled</b> — {esc(execution.symbol)}",
+        "",
+        f"<b>Side:</b> {esc(execution.side)}",
+        f"<b>Volume:</b> {execution.volume:g} lot"
+        f"{'s' if execution.volume != 1 else ''}",
+        f"<b>Fill:</b> <code>{format_price(execution.filled_price)}</code>",
+        f"<b>SL:</b> <code>{format_price(execution.stop_loss)}</code>   "
+        f"<b>TP:</b> <code>{format_price(execution.take_profit)}</code>",
+    ]
+    if slippage:
+        lines.append(f"<b>Slippage:</b> {slippage:+.8g} vs the signal price")
+    if execution.ticket:
+        lines.append(f"<b>Ticket:</b> <code>{execution.ticket}</code>")
+    if execution.comment == "dry-run":
+        lines += ["", "<i>Dry run — no order was actually sent.</i>"]
+    return "\n".join(lines)
+
+
 def format_scoreboard(ledger, settings=None) -> str:
     """Cumulative results across every signal the bot has sent."""
     from tracker import scoreboard

@@ -9,7 +9,10 @@ Every 15 minutes (aligned to the candle close) the bot:
 4. sizes the trade off ATR, scores confidence 1–3, and
 5. pushes anything new to Telegram, de-duplicated through ``signal_state.json``.
 
-It never places an order and never needs an API key — public endpoints only.
+Market data is read from public endpoints only, so no exchange API key is
+needed. Orders are optional and go to a MetaTrader 5 terminal instead: set
+``MT5_ENABLED=true`` to turn execution on. It is off by default, and even
+when on it refuses a live account unless ``MT5_ALLOW_LIVE=true`` as well.
 
 Usage::
 
@@ -21,6 +24,8 @@ Usage::
     python main.py --backtest      # how these setups actually performed on history
     python main.py --report        # send the running win/loss scoreboard
     python main.py --find-chat-id  # print your chat id (needs only the token)
+    python main.py --test-mt5      # verify the MetaTrader 5 connection
+    python main.py --mt5-close-all # flatten every position this bot opened
 """
 
 from __future__ import annotations
@@ -32,13 +37,15 @@ import signal as signal_module
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 from config import ConfigError, Settings, configure_logging, load_settings
 from exchange import ExchangeError, create_exchange, fetch_ohlcv, load_valid_symbols
 from indicators import calculate_indicators, resolve_backend
-from notifier import (TelegramNotifier, discover_chats, format_outcome,
-                      format_scoreboard)
+from notifier import (TelegramNotifier, discover_chats, format_execution,
+                      format_outcome, format_scoreboard)
+from broker_mt5 import (MT5Broker, MT5Error, load_executions,
+                        save_executions)
 from backtest import run_backtest
 from preflight import run_preflight
 from state import load_state, prune_state, record_signal, save_state, should_send
@@ -83,7 +90,8 @@ def sleep_until(target: datetime) -> None:
         time.sleep(min(remaining, 5.0))
 
 
-def scan_once(exchange, symbols: List[str], settings: Settings, notifier: TelegramNotifier) -> int:
+def scan_once(exchange, symbols: List[str], settings: Settings,
+              notifier: TelegramNotifier, broker: Optional[MT5Broker] = None) -> int:
     """Run one full scan across every symbol. Returns signals sent."""
     state = prune_state(load_state(settings.state_file), settings.state_retention_days)
     ledger = load_outcomes(settings.tracker_file)
@@ -160,9 +168,90 @@ def scan_once(exchange, symbols: List[str], settings: Settings, notifier: Telegr
     for sig in delivered:
         track_signal(sig, ledger, settings)
 
+    execute_signals(delivered, settings, notifier, broker)
+
     save_outcomes(settings.tracker_file, ledger)
     save_state(settings.state_file, state)
     return len(delivered)
+
+
+def execute_signals(signals: List[Signal], settings: Settings,
+                    notifier: TelegramNotifier,
+                    broker: Optional[MT5Broker]) -> None:
+    """Send the strongest signals to MetaTrader 5, if execution is enabled.
+
+    Only signals at or above ``MT5_MIN_CONFIDENCE`` are traded, which is a
+    higher bar than the one for alerting: it costs nothing to read an alert you
+    end up ignoring, and it costs a spread to open a position you end up closing.
+
+    Broker trouble is logged and reported, never fatal. Alerting is the bot's
+    primary job; losing the terminal must not stop the next scan from telling
+    you what it found.
+    """
+    if broker is None:
+        return
+
+    tradable = [s for s in signals if s.confidence >= settings.mt5_min_confidence]
+    skipped = len(signals) - len(tradable)
+    if skipped:
+        LOG.info(
+            "MT5: %d signal(s) below the %d/3 execution threshold, alert only",
+            skipped, settings.mt5_min_confidence,
+        )
+    if not tradable:
+        return
+
+    log = load_executions(settings.mt5_execution_file)
+    placed = 0
+    for sig in tradable:
+        try:
+            execution = broker.place(sig)
+        except MT5Error as exc:
+            LOG.error("MT5 execution failed for %s: %s", sig.symbol, exc)
+            notifier.send(
+                f"\u26a0\ufe0f <b>MT5 execution failed</b>\n{sig.symbol} {sig.side}\n"
+                f"<code>{exc}</code>"
+            )
+            break          # the terminal is unwell; do not hammer it this cycle
+        except Exception as exc:  # noqa: BLE001 - one bad order must not stop the scan
+            LOG.exception("Unexpected MT5 error on %s: %s", sig.symbol, exc)
+            continue
+
+        if execution is None:
+            continue       # deliberately skipped; broker.place() already said why
+        log.append(execution.to_dict())
+        if execution.ok:
+            placed += 1
+            notifier.send(format_execution(execution))
+        else:
+            notifier.send(
+                f"\u26d4 <b>MT5 order rejected</b>\n{execution.pair} {execution.side}\n"
+                f"retcode {execution.retcode}: <code>{execution.comment}</code>"
+            )
+
+    if log:
+        save_executions(settings.mt5_execution_file, log)
+    LOG.info("MT5: placed %d order(s) from %d tradable signal(s)",
+             placed, len(tradable))
+
+
+def open_broker(settings: Settings, dry_run: bool) -> Optional[MT5Broker]:
+    """Connect to MetaTrader 5, or return ``None`` and keep alerting.
+
+    A broken terminal downgrades the bot to alert-only rather than taking it
+    down: an unexecuted signal you can still act on by hand beats no signal.
+    """
+    if not settings.mt5_enabled:
+        return None
+    try:
+        settings.require_mt5()
+        broker = MT5Broker(settings, dry_run=dry_run)
+        broker.connect()
+        return broker
+    except (MT5Error, ConfigError) as exc:
+        LOG.error("MT5 execution is enabled but unavailable: %s", exc)
+        LOG.error("Continuing in alert-only mode.")
+        return None
 
 
 def touch_heartbeat(settings: Settings) -> None:
@@ -185,7 +274,8 @@ def touch_heartbeat(settings: Settings) -> None:
         LOG.warning("Could not write heartbeat to %s: %s", settings.heartbeat_file, exc)
 
 
-def build_startup_message(settings: Settings, symbols: List[str], backend: str) -> str:
+def build_startup_message(settings: Settings, symbols: List[str], backend: str,
+                          broker: Optional[MT5Broker] = None) -> str:
     """Human-readable summary of the running configuration."""
     setups = ", ".join(settings.enabled_setups)
     return (
@@ -199,9 +289,110 @@ def build_startup_message(settings: Settings, symbols: List[str], backend: str) 
         f"<b>SL/TP:</b> {settings.atr_sl_multiplier}x / {settings.atr_tp_multiplier}x "
         f"ATR({settings.atr_period})\n"
         f"<b>Min confidence:</b> {settings.min_confidence}/3\n"
-        f"<b>Indicators:</b> {backend}\n\n"
+        f"<b>Indicators:</b> {backend}\n"
+        f"<b>Execution:</b> {_execution_line(settings, broker)}\n\n"
         "<i>You will get an alert on the next qualifying candle close.</i>"
     )
+
+
+def _execution_line(settings: Settings, broker: Optional[MT5Broker]) -> str:
+    """One line describing whether, and how, orders will actually be placed."""
+    if broker is None:
+        return "alert only (MT5 off)" if not settings.mt5_enabled else (
+            "alert only (MT5 enabled but unavailable)"
+        )
+    try:
+        account = broker.account_summary()
+    except MT5Error:
+        return "MT5 connected, account unreadable"
+    suffix = " [DRY RUN]" if broker.dry_run else ""
+    return (
+        f"MT5 {account['mode']} {account['login']} — "
+        f"{account['equity']:,.2f} {account['currency']}, "
+        f"trades at {settings.mt5_min_confidence}/3+{suffix}"
+    )
+
+
+def run_mt5_check(settings: Settings, dry_run: bool = False) -> int:
+    """Print the MT5 account and the symbol each pair maps to.
+
+    Symbol naming is where MT5 setups fail most often - every broker spells
+    ``BTCUSD`` differently - so this prints the resolution for each configured
+    pair rather than only the connection status.
+    """
+    if not settings.mt5_enabled:
+        print("MT5_ENABLED is not set. Set MT5_ENABLED=true to use execution.")
+        return 1
+    try:
+        settings.require_mt5()
+        broker = MT5Broker(settings, dry_run=dry_run)
+        summary = broker.account_summary()
+    except (MT5Error, ConfigError) as exc:
+        print(f"MT5 check FAILED: {exc}")
+        return 1
+
+    print("=" * 72)
+    print(f"Account   : {summary['login']} on {summary['server']} [{summary['mode']}]")
+    print(f"Balance   : {summary['balance']:,.2f} {summary['currency']}")
+    print(f"Equity    : {summary['equity']:,.2f} {summary['currency']}")
+    print(f"Free margin: {summary['margin_free']:,.2f} {summary['currency']}")
+    print(f"Open (this bot): {summary['open_positions']}")
+    print("-" * 72)
+
+    unresolved = []
+    for pair in settings.symbols:
+        resolved = broker.resolve_symbol(pair)
+        print(f"  {pair:<14} -> {resolved or 'NO MATCH'}")
+        if resolved is None:
+            unresolved.append(pair)
+    print("=" * 72)
+
+    if unresolved:
+        print(f"{len(unresolved)} pair(s) have no broker symbol and will never be")
+        print("traded. Map them explicitly, for example:")
+        print("  MT5_SYMBOL_MAP=" + ",".join(f"{p}=YOURSYMBOL" for p in unresolved[:2]))
+    if summary["mode"] == "LIVE":
+        print("This is a LIVE account. Real money will move.")
+    broker.shutdown()
+    return 0
+
+
+def run_mt5_close_all(settings: Settings, dry_run: bool = False) -> int:
+    """Flatten every position this bot opened. The panic button."""
+    if not settings.mt5_enabled:
+        print("MT5_ENABLED is not set; there is nothing for this bot to close.")
+        return 1
+    try:
+        broker = MT5Broker(settings, dry_run=dry_run)
+        broker.connect()
+        positions = broker.open_positions()
+    except (MT5Error, ConfigError) as exc:
+        print(f"Could not reach MetaTrader 5: {exc}")
+        return 1
+
+    if not positions:
+        print(f"No open positions with magic {settings.mt5_magic}.")
+        broker.shutdown()
+        return 0
+
+    failed = 0
+    for position in positions:
+        if dry_run:
+            print(f"[DRY RUN] would close {position.symbol} ticket {position.ticket}")
+            continue
+        execution = broker.close(position)
+        if execution is None or not execution.ok:
+            failed += 1
+            print(f"FAILED to close {position.symbol} ticket {position.ticket}")
+        else:
+            print(f"Closed {position.symbol} ticket {position.ticket} "
+                  f"at {execution.filled_price}")
+    broker.shutdown()
+
+    if failed:
+        print(f"{failed} of {len(positions)} position(s) could not be closed. "
+              "Close them by hand in the terminal.")
+    return 1 if failed else 0
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -220,6 +411,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--backtest", action="store_true",
                         help="replay history for the configured pairs and print "
                              "win rate, expectancy and profit factor per setup")
+    parser.add_argument("--test-mt5", action="store_true",
+                        help="connect to MetaTrader 5, print the account and the "
+                             "resolved symbol for each pair, then exit")
+    parser.add_argument("--mt5-close-all", action="store_true",
+                        help="close every position this bot opened (matched by "
+                             "magic number) and exit")
     parser.add_argument("--preflight", action="store_true",
                         help="check config, exchange, data, state and Telegram, "
                              "then print a report and exit")
@@ -238,6 +435,12 @@ def main(argv=None) -> int:
 
     if args.find_chat_id:
         return discover_chats(settings)
+
+    if args.test_mt5:
+        return run_mt5_check(settings, dry_run=args.dry_run)
+
+    if args.mt5_close_all:
+        return run_mt5_close_all(settings, dry_run=args.dry_run)
 
     if args.backtest:
         # No Telegram credentials needed: this only reads public candles.
@@ -290,11 +493,17 @@ def main(argv=None) -> int:
     signal_module.signal(signal_module.SIGTERM, _handle_signal)
     signal_module.signal(signal_module.SIGINT, _handle_signal)
 
+    broker = open_broker(settings, dry_run=args.dry_run)
+
     if settings.send_startup_message and not args.once:
-        notifier.send(build_startup_message(settings, symbols, backend))
+        notifier.send(build_startup_message(settings, symbols, backend, broker))
 
     if args.once:
-        scan_once(exchange, symbols, settings, notifier)
+        try:
+            scan_once(exchange, symbols, settings, notifier, broker)
+        finally:
+            if broker is not None:
+                broker.shutdown()
         touch_heartbeat(settings)
         return 0
 
@@ -303,7 +512,7 @@ def main(argv=None) -> int:
     while not _SHUTDOWN:
         cycle_started = datetime.now(timezone.utc)
         try:
-            scan_once(exchange, symbols, settings, notifier)
+            scan_once(exchange, symbols, settings, notifier, broker)
         except Exception as exc:  # noqa: BLE001 - the loop must never die
             LOG.exception("Unhandled error during scan: %s", exc)
         touch_heartbeat(settings)
@@ -323,6 +532,8 @@ def main(argv=None) -> int:
         )
         sleep_until(target)
 
+    if broker is not None:
+        broker.shutdown()
     LOG.info("Bye.")
     return 0
 

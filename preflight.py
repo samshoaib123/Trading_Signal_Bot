@@ -228,6 +228,61 @@ def _telegram_check(settings, notifier) -> CheckResult:
     )
 
 
+def _mt5_check(settings) -> CheckResult:
+    """Can we reach MetaTrader 5, and will the configured pairs map to symbols?
+
+    Skipped as a PASS when execution is off - an alert-only deployment is a
+    perfectly good deployment, not a half-finished one.
+    """
+    if not settings.mt5_enabled:
+        return CheckResult(
+            "MT5 execution", PASS,
+            "off - alerts only, no orders will be placed",
+        )
+
+    from broker_mt5 import MT5Broker, MT5Error  # noqa: PLC0415 - optional path
+
+    try:
+        settings.require_mt5()
+    except Exception as exc:  # noqa: BLE001 - ConfigError, reported not raised
+        return CheckResult("MT5 execution", FAIL, str(exc),
+                           "Fix the MT5_* variables and re-run --preflight.")
+
+    try:
+        broker = MT5Broker(settings)
+        summary = broker.account_summary()
+    except MT5Error as exc:
+        return CheckResult(
+            "MT5 execution", FAIL, str(exc),
+            "MetaTrader 5's Python API is Windows-only and needs the terminal "
+            "installed and logged in, with Algo Trading enabled. Set "
+            "MT5_ENABLED=false to deploy as alerts-only instead.",
+        )
+
+    unresolved = [p for p in settings.symbols if broker.resolve_symbol(p) is None]
+    broker.shutdown()
+
+    detail = (f"{summary['mode']} {summary['login']} on {summary['server']}, "
+              f"{summary['equity']:,.2f} {summary['currency']}")
+
+    if unresolved:
+        return CheckResult(
+            "MT5 execution", WARN,
+            f"{detail}; {len(unresolved)} pair(s) have no broker symbol",
+            "These pairs will alert but never trade: "
+            + ", ".join(unresolved[:5])
+            + ". Map them with MT5_SYMBOL_MAP=PAIR=BROKERSYMBOL,... - run "
+            "'python main.py --test-mt5' to see what resolved.",
+        )
+    if summary["mode"] == "LIVE":
+        return CheckResult(
+            "MT5 execution", WARN, f"{detail} - REAL MONEY",
+            "This account is live. Run on a demo account until you have watched "
+            "the bot trade for a while.",
+        )
+    return CheckResult("MT5 execution", PASS, detail)
+
+
 def run_preflight(settings, notifier) -> int:
     """Run every check and print a report. Returns a process exit code."""
     results: List[CheckResult] = []
@@ -251,6 +306,8 @@ def run_preflight(settings, notifier) -> int:
         ))
     else:
         results.append(_telegram_check(settings, notifier))
+
+    results.append(_mt5_check(settings))
 
     _print_report(results)
     return 0 if all(r.ok for r in results) else 1

@@ -6,8 +6,9 @@ loss / take profit, a 1–3 confidence score, and a suggested position size.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samshoaib123/Trading_Signal_Bot/blob/main/notebooks/colab_quickstart.ipynb)
 
-**It never places an order and never needs an exchange API key.** Public ccxt
-endpoints only.
+**Market data is read-only and needs no exchange API key** — public ccxt
+endpoints only. Order execution is optional, goes to a **MetaTrader 5** terminal
+rather than the exchange, and is [off by default](#metatrader-5-execution).
 
 ```
 🟢 🚀 BUY Signal
@@ -34,6 +35,7 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 - [Does it actually work? Backtest it](#does-it-actually-work-backtest-it)
 - [Outcome tracking](#outcome-tracking)
 - [Web dashboard](#web-dashboard)
+- [MetaTrader 5 execution](#metatrader-5-execution)
 - [Risk levels and position sizing](#risk-levels-and-position-sizing)
 - [Confidence score](#confidence-score)
 - [Deduplication](#deduplication)
@@ -225,6 +227,119 @@ after the first successful open, so the page's own API calls keep working.
 | `/api/history` | Closed results and the cumulative scoreboard |
 | `/api/backtest` | Per-setup historical performance as JSON |
 | `/healthz` | Liveness probe |
+
+---
+
+## MetaTrader 5 execution
+
+Everything else in this bot reads. This is the one part that can move money, so
+it is built to fail closed.
+
+**Two switches, both off by default.** `MT5_ENABLED=true` turns execution on at
+all. `MT5_ALLOW_LIVE=true` is then needed on top of it before the bot will touch
+an account the terminal does not report as a **demo** account. Get one wrong and
+the worst case is demo money.
+
+### Requirements
+
+MetaTrader 5's Python API is a wrapper around the terminal's IPC interface, and
+that terminal is a Windows application. There is no Linux or macOS wheel.
+
+```bash
+pip install -r requirements-mt5.txt     # Windows only
+```
+
+The terminal must be installed, logged in, and have **Algo Trading** enabled in
+its toolbar. The rest of the bot — scanning, alerts, dashboard, Docker image —
+runs anywhere as before; only execution needs Windows.
+
+### Setup
+
+```bash
+MT5_ENABLED=true
+MT5_LOGIN=12345678          # or leave all three blank to use whatever
+MT5_PASSWORD=...            # account the terminal is already logged into
+MT5_SERVER=YourBroker-Demo
+```
+
+Then check the wiring before you let it trade anything:
+
+```bash
+python main.py --test-mt5
+```
+
+```
+========================================================================
+Account   : 12345678 on YourBroker-Demo [DEMO]
+Balance   : 10,000.00 USD
+Equity    : 10,000.00 USD
+Free margin: 9,880.00 USD
+Open (this bot): 0
+------------------------------------------------------------------------
+  BTC/USDT       -> BTCUSD
+  ETH/USDT       -> ETHUSD
+  MATIC/USDT     -> NO MATCH
+========================================================================
+```
+
+Symbol naming is where MT5 setups usually break: every broker spells the same
+instrument differently. The bot guesses (`BTC/USDT` → `BTCUSDT`, then `BTCUSD`),
+and you correct what it gets wrong:
+
+```bash
+MT5_SYMBOL_MAP=BTC/USDT=BTCUSD,MATIC/USDT=MATICUSD
+MT5_SYMBOL_SUFFIX=.r          # for brokers that suffix everything
+```
+
+A pair with no symbol still alerts — it just never trades.
+
+### How a signal becomes an order
+
+1. A signal must score at least `MT5_MIN_CONFIDENCE` (default **2/3**). This is
+   deliberately stricter than `MIN_CONFIDENCE` for alerts: ignoring a weak alert
+   is free, opening a weak position costs a spread.
+2. The bot takes the **broker's** price (ask to buy, bid to sell), not Binance's,
+   and re-anchors the stop and target to it — so the ATR distance survives
+   contact with a real spread and the risk budget stays honest.
+3. Lot size comes from `RISK_PERCENT` of account **equity** divided by what the
+   stop distance actually costs per lot:
+   `(stop distance / tick size) × tick value`. That formula stays correct on
+   instruments whose tick size is not one point. It is never a fixed lot.
+4. Size is rounded **down** to the broker's volume step. If even the minimum lot
+   would risk more than the budget, the trade is skipped rather than oversized.
+5. The order goes out with SL and TP attached and this bot's `MT5_MAGIC` tag, so
+   it only ever counts and manages its own positions.
+6. Fills, slippage and rejections are logged to `mt5_executions.json` and
+   confirmed on Telegram.
+
+### Limits
+
+| Variable | Default | Caps |
+| --- | --- | --- |
+| `MT5_MAX_OPEN_POSITIONS` | `3` | positions held at once |
+| `MT5_MAX_ORDERS_PER_DAY` | `10` | orders per UTC day |
+| `MT5_MAX_LOT` | `0` (broker max) | lot size, whatever sizing asks for |
+| `MT5_MIN_CONFIDENCE` | `2` | which signals are tradable at all |
+
+One position per symbol is enforced regardless, and a broker that goes
+unreachable downgrades the bot to alert-only rather than taking it down.
+
+### The panic button
+
+```bash
+python main.py --mt5-close-all      # flatten every position this bot opened
+python main.py --dry-run            # scan and size, send nothing, anywhere
+```
+
+`MT5_DRY_RUN=true` does the same as `--dry-run` for orders only, so you can keep
+Telegram alerts live while execution is being watched.
+
+### Before you enable it
+
+Run it on a **demo** account for long enough to see losing streaks, not just the
+first winner. `python main.py --backtest` tells you how the setups performed on
+history; the demo account tells you what the spread does to that. Neither is a
+promise about the next trade.
 
 ---
 
@@ -733,6 +848,28 @@ Only the first two are required. Everything else has a working default — see
 | `PORT` | `8000` | Port the dashboard listens on |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
+### MetaTrader 5 execution (optional, off by default)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MT5_ENABLED` | `false` | Switch 1: place orders at all |
+| `MT5_ALLOW_LIVE` | `false` | Switch 2: permit a non-demo account |
+| `MT5_DRY_RUN` | `false` | Size and log orders without sending them |
+| `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` | — | All three, or none (use the logged-in terminal) |
+| `MT5_PATH` | — | `terminal64.exe`, only if it is not in the default location |
+| `MT5_SYMBOL_MAP` | — | `BTC/USDT=BTCUSD,…` overrides for broker naming |
+| `MT5_SYMBOL_SUFFIX` | — | Broker-wide suffix, e.g. `.r` |
+| `MT5_MAGIC` | `907001` | Tags this bot's positions |
+| `MT5_DEVIATION_POINTS` | `20` | Slippage tolerated, in points |
+| `MT5_FILLING_MODE` | auto | `FOK` / `IOC` / `RETURN`; blank asks the symbol |
+| `MT5_MAX_OPEN_POSITIONS` | `3` | `0` = unlimited |
+| `MT5_MAX_ORDERS_PER_DAY` | `10` | `0` = unlimited |
+| `MT5_MAX_LOT` | `0` | Hard lot ceiling; `0` = broker's max |
+| `MT5_MIN_CONFIDENCE` | `2` | Minimum score out of 3 to trade |
+| `MT5_EXECUTION_FILE` | `mt5_executions.json` | Broker fills, slippage, rejections |
+
+See [MetaTrader 5 execution](#metatrader-5-execution) for what these actually do.
+
 ---
 
 ## Project layout
@@ -744,6 +881,7 @@ exchange.py        ccxt client, retrying OHLCV fetch, symbol validation
 indicators.py      RSI / MACD / Bollinger / ATR / EMA / SMA (+ pandas-ta backend)
 strategies.py      Setup detection, ATR levels, confidence scoring, sizing
 notifier.py        Telegram HTML formatting and delivery with retries
+broker_mt5.py      MetaTrader 5 execution: sizing, guards, orders (optional)
 state.py           Atomic JSON state, deduplication rules, pruning
 local_config.example.py  Optional hard-coded settings (copy to local_config.py)
 tracker.py         Follows sent signals to their stop or target, keeps the score
@@ -751,12 +889,13 @@ webserver.py       FastAPI dashboard: live market state, positions, backtest
 dashboard.html     The dashboard page (no build step, no framework)
 backtest.py        Historical replay with fees, per-setup performance report
 preflight.py       --preflight self-check with actionable failure hints
-tests/             189 unit and pipeline tests (no network required)
+tests/             265 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
 Dockerfile         Python 3.12 slim image, non-root
 docker-compose.yml Compose service with a persistent state volume
+requirements-mt5.txt Optional MetaTrader 5 dependency (Windows only)
 railway.json       Railway build/deploy configuration
 Procfile           Worker declaration for Procfile-based hosts
 ```
@@ -773,13 +912,19 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-189 tests, no network needed. They cover indicator maths against hand-computed
+265 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt
 files, Telegram message rendering and 4096-char splitting, candle-close
 scheduling across hour and day boundaries, the heartbeat file, and a full
 fake-exchange pipeline run from raw candles to formatted message.
+
+MetaTrader 5 is Windows-only and drives a GUI terminal, so `tests/test_broker_mt5.py`
+runs the broker against a fake terminal instead: risk-based lot sizing across
+tick sizes and volume steps, the demo-only and credential guards, symbol
+resolution and its fallbacks, spread-crossing and stop re-anchoring, every
+position and order limit, and rejection handling.
 
 ---
 
@@ -820,7 +965,14 @@ Expected on Python 3.11 and below — see
 ## Disclaimer
 
 This software generates **technical analysis signals for educational purposes
-only**. It is not investment advice, it does not place trades, and no setup has
-a guaranteed win rate regardless of what any tutorial claims. Backtest before
-risking capital, never risk money you cannot afford to lose, and treat the
-suggested position size as arithmetic, not a recommendation.
+only**. It is not investment advice, and no setup has a guaranteed win rate
+regardless of what any tutorial claims. Backtest before risking capital, never
+risk money you cannot afford to lose, and treat the suggested position size as
+arithmetic, not a recommendation.
+
+MetaTrader 5 execution is **off by default**. When you turn it on, this software
+places real orders on whatever account you point it at, and every loss those
+orders make is yours. The demo-only guard, the position and order caps and the
+risk-based sizing reduce the damage a mistake can do; none of them make
+automated trading safe. Run it on a demo account first, and keep running it
+there until you have watched it lose as well as win.

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -22,7 +23,7 @@ import ccxt  # noqa: E402
 
 from config import Settings  # noqa: E402
 from exchange import fetch_ohlcv, load_valid_symbols  # noqa: E402
-from main import scan_once  # noqa: E402
+from main import execute_signals, scan_once  # noqa: E402
 from state import load_state  # noqa: E402
 
 CANDLE_MS = 15 * 60 * 1000
@@ -425,3 +426,125 @@ class TestOutcomeTrackingInTheLoop(unittest.TestCase):
         exchange = FakeExchange({"BTC/USDT": bounce_series()})
         scan_once(exchange, ["BTC/USDT"], settings, RecordingNotifier())
         self.assertEqual(load_outcomes(settings.tracker_file)["open"], [])
+
+
+class RecordingBroker:
+    """Stands in for MT5Broker at the scan_once boundary."""
+
+    def __init__(self, outcome="ok", error=None):
+        self.outcome = outcome
+        self.error = error
+        self.seen = []
+
+    def place(self, signal):
+        self.seen.append(signal)
+        if self.error is not None:
+            raise self.error
+        if self.outcome is None:
+            return None
+        from broker_mt5 import Execution
+
+        return Execution(
+            symbol="BTCUSD", pair=signal.symbol, side=signal.side, volume=0.1,
+            requested_price=signal.entry, filled_price=signal.entry,
+            stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+            ticket=1 if self.outcome == "ok" else 0,
+            retcode=10009 if self.outcome == "ok" else 10030,
+            comment="" if self.outcome == "ok" else "rejected",
+        )
+
+
+class TestMT5Wiring(unittest.TestCase):
+    """scan_once must route delivered signals to the broker - and survive it."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.settings = replace(
+            Settings(),
+            state_file=os.path.join(self.tmpdir.name, "state.json"),
+            tracker_file=os.path.join(self.tmpdir.name, "outcomes.json"),
+            mt5_execution_file=os.path.join(self.tmpdir.name, "executions.json"),
+            fetch_backoff_seconds=0.0,
+            symbols=["BTC/USDT"],
+            mt5_enabled=True,
+            mt5_min_confidence=1,
+        )
+        self.exchange = FakeExchange({"BTC/USDT": bounce_series()})
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def scan(self, broker):
+        return scan_once(self.exchange, ["BTC/USDT"], self.settings,
+                         RecordingNotifier(), broker)
+
+    def test_no_broker_means_alerts_only(self):
+        # The default path, and the one every existing deployment is on.
+        self.assertEqual(self.scan(None), 1)
+        self.assertFalse(os.path.exists(self.settings.mt5_execution_file))
+
+    def test_a_delivered_signal_reaches_the_broker(self):
+        broker = RecordingBroker()
+        self.scan(broker)
+        self.assertEqual(len(broker.seen), 1)
+        self.assertEqual(broker.seen[0].symbol, "BTC/USDT")
+
+    def test_the_fill_is_written_to_the_execution_log(self):
+        from broker_mt5 import load_executions
+
+        self.scan(RecordingBroker())
+        log = load_executions(self.settings.mt5_execution_file)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["ticket"], 1)
+
+    def test_signals_below_the_execution_threshold_are_not_traded(self):
+        # Alerting and trading have separate bars: a 1/3 signal is worth telling
+        # you about and not worth paying a spread for.
+        from strategies import BUY, Signal
+
+        weak = Signal(
+            symbol="BTC/USDT", setup="rsi_reversal", side=BUY, entry=100.0,
+            stop_loss=98.0, take_profit=104.0, atr=2.0, timeframe="15m",
+            candle_time=datetime(2024, 6, 1, tzinfo=timezone.utc), confidence=1,
+        )
+        strong = replace(weak, confidence=2, setup="macd_crossover")
+        broker = RecordingBroker()
+        settings = replace(self.settings, mt5_min_confidence=2)
+
+        execute_signals([weak, strong], settings, RecordingNotifier(), broker)
+
+        self.assertEqual([s.confidence for s in broker.seen], [2])
+
+    def test_a_rejected_order_is_logged_but_not_counted_as_a_fill(self):
+        from broker_mt5 import load_executions
+
+        self.scan(RecordingBroker(outcome="rejected"))
+        log = load_executions(self.settings.mt5_execution_file)
+        self.assertEqual(log[0]["ticket"], 0)
+        self.assertEqual(log[0]["retcode"], 10030)
+
+    def test_a_skipped_trade_writes_nothing(self):
+        self.scan(RecordingBroker(outcome=None))
+        self.assertFalse(os.path.exists(self.settings.mt5_execution_file))
+
+    def test_broker_failure_does_not_break_the_scan(self):
+        from broker_mt5 import MT5Error
+
+        # Alerting is the primary job; a dead terminal must not cost you the
+        # alert you could still act on by hand.
+        notifier = RecordingNotifier()
+        sent = scan_once(self.exchange, ["BTC/USDT"], self.settings, notifier,
+                         RecordingBroker(error=MT5Error("terminal gone")))
+        self.assertEqual(sent, 1)
+        self.assertTrue(any("execution failed" in m for m in notifier.messages))
+
+    def test_an_unexpected_broker_error_does_not_break_the_scan_either(self):
+        sent = self.scan(RecordingBroker(error=ValueError("boom")))
+        self.assertEqual(sent, 1)
+
+    def test_state_is_still_persisted_when_the_broker_fails(self):
+        from broker_mt5 import MT5Error
+
+        self.scan(RecordingBroker(error=MT5Error("terminal gone")))
+        self.assertIn("BTC/USDT|rsi_reversal|BUY",
+                      load_state(self.settings.state_file))
