@@ -24,7 +24,7 @@ the Bollinger Bands, so their outputs agree to within floating point noise.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -153,6 +153,148 @@ def atr(
     return rma(true_range(high, low, close), length)
 
 
+def stoch_rsi(
+    close: pd.Series, length: int = 14, stoch_length: int = 14,
+    smooth_k: int = 3, smooth_d: int = 3,
+) -> pd.DataFrame:
+    """Stochastic RSI: where RSI sits inside its own recent range.
+
+    RSI tells you momentum; Stoch-RSI tells you whether that momentum is
+    stretched *relative to how stretched it has recently been*, which is why it
+    turns earlier than RSI and why it is paired with a slower filter.
+
+    A flat RSI window has no range to normalise against. Rather than divide by
+    zero we emit 50 (dead centre), which reads as "no information" to every
+    caller instead of as an extreme.
+    """
+    base = rsi(close, length)
+    low = base.rolling(window=stoch_length, min_periods=stoch_length).min()
+    high = base.rolling(window=stoch_length, min_periods=stoch_length).max()
+    span = high - low
+    raw = 100.0 * (base - low) / span.replace(0.0, np.nan)
+    raw = raw.where(span != 0.0, 50.0).where(base.notna() & low.notna())
+    # The value is a percentage position inside a range, so [0, 100] is exact by
+    # definition. Rounding can still land a ulp outside it, and a caller
+    # comparing against an 80 threshold should never have to wonder.
+    raw = raw.clip(0.0, 100.0)
+    k = raw.rolling(window=smooth_k, min_periods=smooth_k).mean()
+    return pd.DataFrame({"stochrsi_k": k,
+                         "stochrsi_d": k.rolling(window=smooth_d,
+                                                 min_periods=smooth_d).mean()})
+
+
+def adx(
+    high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14
+) -> pd.DataFrame:
+    """Wilder's ADX with its +DI / -DI components.
+
+    ADX measures how *strongly* price is trending, not which way: a reading
+    climbing through 25 says the move has conviction, and a reading under it
+    says the same setup is far likelier to chop. +DI / -DI carry the direction.
+    """
+    up = high.diff()
+    down = -low.diff()
+    # A bar only counts towards one direction: the larger move wins, and a bar
+    # that expanded on neither side counts for neither.
+    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=low.index)
+
+    atr_ = rma(true_range(high, low, close), length)
+    safe_atr = atr_.replace(0.0, np.nan)
+    plus_di = 100.0 * rma(plus_dm, length) / safe_atr
+    minus_di = 100.0 * rma(minus_dm, length) / safe_atr
+
+    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / di_sum
+    return pd.DataFrame({"adx": rma(dx, length),
+                         "plus_di": plus_di, "minus_di": minus_di})
+
+
+def keltner_channels(
+    high: pd.Series, low: pd.Series, close: pd.Series,
+    length: int = 20, multiplier: float = 1.5,
+) -> pd.DataFrame:
+    """Keltner Channels: an EMA envelope scaled by ATR."""
+    mid = ema(close, length)
+    band = multiplier * atr(high, low, close, length)
+    return pd.DataFrame({"kc_lower": mid - band, "kc_mid": mid, "kc_upper": mid + band})
+
+
+def squeeze(
+    high: pd.Series, low: pd.Series, close: pd.Series,
+    bb_length: int = 20, bb_std: float = 2.0,
+    kc_length: int = 20, kc_multiplier: float = 1.5,
+) -> pd.DataFrame:
+    """Bollinger-in-Keltner squeeze: volatility coiled and about to release.
+
+    When the Bollinger Bands contract *inside* the Keltner Channels, realised
+    volatility has fallen below its ATR-implied baseline. That is the classic
+    squeeze: it says nothing about direction, only that the range is unusually
+    tight, so a breakout from here has room to run.
+
+    ``squeeze_off`` marks the first bar after a squeeze ends — the fire signal,
+    as opposed to the wait. ``bb_bandwidth`` is the raw tightness measure, kept
+    because it is comparable across instruments in a way band prices are not.
+    """
+    bb = bollinger_bands(close, bb_length, bb_std)
+    kc = keltner_channels(high, low, close, kc_length, kc_multiplier)
+    on = (bb["bb_lower"] > kc["kc_lower"]) & (bb["bb_upper"] < kc["kc_upper"])
+    known = bb["bb_lower"].notna() & kc["kc_lower"].notna()
+    on = on.where(known)
+    bandwidth = (bb["bb_upper"] - bb["bb_lower"]) / bb["bb_mid"].replace(0.0, np.nan)
+    return pd.DataFrame({
+        "squeeze_on": on,
+        # .shift(1) is the previous bar's state, so "was on, is now off".
+        "squeeze_off": (on == False) & (on.shift(1) == True),  # noqa: E712
+        "bb_bandwidth": bandwidth,
+    })
+
+
+def ema_ribbon(
+    close: pd.Series, lengths: Sequence[int], min_width: float = 0.0
+) -> pd.DataFrame:
+    """A fan of EMAs, plus whether it is cleanly stacked *and* meaningfully open.
+
+    One EMA tells you the trend; a ribbon tells you how *orderly* it is. Fully
+    stacked (every fast EMA above every slow one) is a trend with agreement
+    across horizons. Tangled is the same trend without it, which is where
+    trend-following setups go to die — so the strategy layer gates on the stack,
+    not on a single crossover.
+
+    Ordering on its own is not enough. In a flat, noisy market the EMAs sit
+    almost on top of each other and their order flips essentially at random, so
+    a pure stacking test calls chop a trend roughly half the time. ``min_width``
+    is the floor the fan must be open by, as a fraction of price — measured
+    relative to price so one threshold works from a $0.50 altcoin to $4,000
+    gold. It defaults to 0 (ordering only); the strategy layer passes a real
+    value.
+    """
+    ordered = sorted(lengths)
+    frame = pd.DataFrame(index=close.index)
+    lines = []
+    for length in ordered:
+        col = f"ribbon_{length}"
+        frame[col] = ema(close, length)
+        lines.append(frame[col])
+
+    stacked = pd.concat(lines, axis=1)
+    known = stacked.notna().all(axis=1)
+    widest, narrowest = stacked.max(axis=1), stacked.min(axis=1)
+    width = (widest - narrowest) / close.replace(0.0, np.nan)
+    frame["ribbon_width"] = width
+
+    # Fast-to-slow order: strictly descending values = bullish stack.
+    diffs = stacked.diff(axis=1).iloc[:, 1:]
+    open_enough = width >= min_width if min_width > 0 else pd.Series(True, close.index)
+    frame["ribbon_bull"] = (
+        ((diffs < 0).all(axis=1) & open_enough & known).where(known)
+    )
+    frame["ribbon_bear"] = (
+        ((diffs > 0).all(axis=1) & open_enough & known).where(known)
+    )
+    return frame
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -211,6 +353,18 @@ def calculate_indicators(df: pd.DataFrame, settings) -> pd.DataFrame:
         )
         out = out.join(bollinger_bands(close, settings.bb_period, settings.bb_std))
         out["atr"] = atr(high, low, close, settings.atr_period)
+
+    # Trend Sniper inputs. Always computed here rather than in the pandas-ta
+    # branch above: pandas-ta's squeeze and ribbon differ between versions, and
+    # a setup that silently changes shape with an optional dependency is worse
+    # than one that is a touch slower.
+    out = out.join(stoch_rsi(close, settings.rsi_period, settings.stoch_rsi_period,
+                             settings.stoch_rsi_k, settings.stoch_rsi_d))
+    out = out.join(adx(high, low, close, settings.adx_period))
+    out = out.join(squeeze(high, low, close, settings.bb_period, settings.bb_std,
+                           settings.kc_period, settings.kc_multiplier))
+    out = out.join(ema_ribbon(close, settings.ribbon_lengths,
+                          settings.ribbon_min_width))
 
     # Shared confirmation inputs (identical for both backends).
     out["volume_sma"] = sma(out["volume"], settings.volume_sma_period)

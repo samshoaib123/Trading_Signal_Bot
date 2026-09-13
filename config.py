@@ -123,6 +123,32 @@ def _get_list(name: str, default: List[str]) -> List[str]:
     return items or list(default)
 
 
+def _get_number_list(name: str, default: list, cast) -> list:
+    """Parse a comma-separated list of numbers, falling back wholesale on error.
+
+    Partial parsing would be worse than useless here: half a take-profit ladder
+    is not a smaller ladder, it is a different strategy.
+    """
+    raw = _get_str(name)
+    if not raw:
+        return list(default)
+    try:
+        items = [cast(part.strip()) for part in raw.split(",") if part.strip()]
+    except ValueError:
+        LOG.warning("Env %s=%r is not a list of numbers, using %s",
+                    name, raw, default)
+        return list(default)
+    return items or list(default)
+
+
+def _get_int_list(name: str, default: list) -> list:
+    return _get_number_list(name, default, int)
+
+
+def _get_float_list(name: str, default: list) -> list:
+    return _get_number_list(name, default, float)
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of the bot configuration."""
@@ -166,6 +192,41 @@ class Settings:
     min_confidence: int = 1
     enabled_setups: List[str] = field(
         default_factory=lambda: ["rsi_reversal", "macd_crossover", "bb_breakout"]
+    )
+
+    # --- Trend Sniper --------------------------------------------------
+    # A multi-filter trend setup: an EMA ribbon for direction, a Bollinger
+    # squeeze for timing, MACD and Stoch-RSI for momentum, ADX for whether the
+    # market is trending enough to bother, and four scaled take-profits.
+    stoch_rsi_period: int = 14
+    stoch_rsi_k: int = 3
+    stoch_rsi_d: int = 3
+    stoch_rsi_oversold: float = 20.0
+    stoch_rsi_overbought: float = 80.0
+    adx_period: int = 14
+    adx_trending: float = 25.0
+    adx_building: float = 20.0
+    kc_period: int = 20
+    kc_multiplier: float = 1.5
+    ribbon_lengths: List[int] = field(default_factory=lambda: [8, 13, 21, 34, 55])
+    # How far the ribbon must be open, as a fraction of price, before a
+    # stack counts as a trend rather than noise happening to line up.
+    ribbon_min_width: float = 0.002
+    # Take-profit ladder, in ATR multiples of the entry. Four targets, scaled so
+    # the first is reachable often and the last pays for the ones that miss.
+    tp_atr_multipliers: List[float] = field(
+        default_factory=lambda: [1.0, 2.0, 3.0, 4.0]
+    )
+    # Fraction of the position closed at each target. The remainder rides to the
+    # final one. Must be the same length as tp_atr_multipliers.
+    tp_close_fractions: List[float] = field(
+        default_factory=lambda: [0.4, 0.3, 0.2, 0.1]
+    )
+    # Move the stop to break-even once this target is reached (1-based; 0 = off).
+    breakeven_after_target: int = 1
+    # Higher timeframes shown in the multi-timeframe context panel.
+    context_timeframes: List[str] = field(
+        default_factory=lambda: ["15m", "1h", "4h", "1d"]
     )
 
     # --- MetaTrader 5 execution -------------------------------------------
@@ -295,6 +356,25 @@ def load_settings() -> Settings:
             for s in _get_list(
                 "ENABLED_SETUPS", ["rsi_reversal", "macd_crossover", "bb_breakout"]
             )
+        ],
+        stoch_rsi_period=_get_int("STOCH_RSI_PERIOD", 14),
+        stoch_rsi_k=_get_int("STOCH_RSI_K", 3),
+        stoch_rsi_d=_get_int("STOCH_RSI_D", 3),
+        stoch_rsi_oversold=_get_float("STOCH_RSI_OVERSOLD", 20.0),
+        stoch_rsi_overbought=_get_float("STOCH_RSI_OVERBOUGHT", 80.0),
+        adx_period=_get_int("ADX_PERIOD", 14),
+        adx_trending=_get_float("ADX_TRENDING", 25.0),
+        adx_building=_get_float("ADX_BUILDING", 20.0),
+        kc_period=_get_int("KC_PERIOD", 20),
+        kc_multiplier=_get_float("KC_MULTIPLIER", 1.5),
+        ribbon_lengths=_get_int_list("RIBBON_LENGTHS", [8, 13, 21, 34, 55]),
+        ribbon_min_width=_get_float("RIBBON_MIN_WIDTH", 0.002),
+        tp_atr_multipliers=_get_float_list("TP_ATR_MULTIPLIERS", [1.0, 2.0, 3.0, 4.0]),
+        tp_close_fractions=_get_float_list("TP_CLOSE_FRACTIONS", [0.4, 0.3, 0.2, 0.1]),
+        breakeven_after_target=_get_int("BREAKEVEN_AFTER_TARGET", 1),
+        context_timeframes=[
+            tf.lower() for tf in _get_list("CONTEXT_TIMEFRAMES",
+                                           ["15m", "1h", "4h", "1d"])
         ],
         mt5_enabled=_get_bool("MT5_ENABLED", False),
         mt5_allow_live=_get_bool("MT5_ALLOW_LIVE", False),
