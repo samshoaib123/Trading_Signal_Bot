@@ -31,10 +31,11 @@ Suggested size: 0.0125 BTC (≈ 812.50 USDT notional, risking 10.00 USDT)
 ## Contents
 
 - [How it works](#how-it-works)
-- [The three setups](#the-three-setups)
+- [The setups](#the-three-setups)
+- [Trend Sniper](#trend-sniper)
 - [Does it actually work? Backtest it](#does-it-actually-work-backtest-it)
 - [Outcome tracking](#outcome-tracking)
-- [Web dashboard](#web-dashboard)
+- [The board](#the-board)
 - [MetaTrader 5 execution](#metatrader-5-execution)
 - [Risk levels and position sizing](#risk-levels-and-position-sizing)
 - [Confidence score](#confidence-score)
@@ -110,6 +111,52 @@ Turn individual setups off with `ENABLED_SETUPS=rsi_reversal,macd_crossover`.
 
 ---
 
+## Trend Sniper
+
+Three of the four setups fire on a single condition. This one requires four to
+agree on the same candle, and is off by default — turn it on with:
+
+```bash
+ENABLED_SETUPS=rsi_reversal,macd_crossover,bb_breakout,trend_sniper
+```
+
+| Leg | What it contributes | Without it |
+| --- | --- | --- |
+| **Squeeze release** (Bollinger inside Keltner, then out) | Timing | You enter somewhere inside the range and wait, exposed |
+| **EMA ribbon stacked and open** (8/13/21/34/55) | Direction | Ordering alone flips at random in chop, so noise reads as a trend |
+| **ADX ≥ 25** | Permission | A breakout into a directionless market — how breakout systems bleed |
+| **MACD histogram + Stoch-RSI** | Momentum, not exhaustion | You buy the part of the move that has already happened |
+
+`+DI` / `-DI` break the direction tie, so a bullish ribbon with bearish
+directional movement produces nothing rather than a coin flip.
+
+### Four targets, not one
+
+A single take-profit forces one number to be right twice: near enough to be
+reached often, far enough to pay for the trades that miss. The sniper splits it:
+
+| Rung | Distance | Closes |
+| --- | --- | --- |
+| TP1 | 1× ATR | 40% |
+| TP2 | 2× ATR | 30% |
+| TP3 | 3× ATR | 20% |
+| TP4 | 4× ATR | 10% |
+
+Once TP1 is in, the stop moves to break-even. So a trade that runs and then
+reverses gives back what is left rather than a full R — and the tracker reports
+that as the different trade it is, rather than lumping it in with a full loss.
+
+Every number here is configurable (`TP_ATR_MULTIPLIERS`, `TP_CLOSE_FRACTIONS`,
+`BREAKEVEN_AFTER_TARGET`). The two lists must be the same length; a mismatch
+falls back to a single target rather than silently trading half a ladder.
+
+**This is not a proven edge.** It is a defensible set of filters. Run
+`python main.py --backtest` on your own pairs and look at the expectancy before
+you believe anything about it — and treat any win rate quoted anywhere, here or
+elsewhere, as a claim to verify rather than a number to rely on.
+
+---
+
 ## Does it actually work? Backtest it
 
 ```bash
@@ -166,16 +213,38 @@ judged; this is what lets you tell a normal losing streak from a broken setup.
 
 ---
 
-## Web dashboard
+## The board
 
 ```bash
 python webserver.py            # http://localhost:8000
 ```
 
-A live web view of everything the Telegram alerts carry, plus the current state
-of every watched pair: price, RSI, Bollinger position, MACD, ATR%, trend, volume
-ratio, any setup firing right now, open positions marked to the live price,
-closed results, and a backtest you can run from the page.
+A live trading board, not a list of numbers. It answers the questions you open a
+board to ask:
+
+| Panel | Shows |
+| --- | --- |
+| **Header** | MT5 account, balance, equity, floating P/L, and the running record |
+| **Context** | Higher-timeframe bias (15m / 1h / 4h / 1d), how many agree, and ADX |
+| **Open positions** | Entry, stop, which rungs of the ladder are in, what is banked, live P/L and the peak — all in R |
+| **Market watch** | Every watched pair with its squeeze, ribbon, ADX and anything firing |
+| **Risk & execution** | What the running process is actually configured to do |
+| **Bot decision** | What fired this cycle, and what was looked at and passed over |
+| **Closed results** | Every position seen through to a stop or a target |
+| **Backtest** | Run it from the page |
+
+Two details worth knowing, because they are easy to get wrong and both were:
+
+*Alignment* means the timeframes that have an opinion share it. A 2/4 that is two
+bulls and two bears is a disagreement, not half an agreement.
+
+*Live P/L* is what has been banked plus what the **remaining** part of the
+position is doing. After two rungs have closed, only 30% is still exposed, so
+marking the full size to market would report a number the trade can no longer
+make or lose.
+
+When MT5 execution is off the board says **alert only** rather than showing a
+balance it does not have.
 
 It is built on the **same modules the bot runs** — `exchange`, `indicators`,
 `strategies`, `tracker`, `backtest` — so there is no second implementation that
@@ -885,11 +954,11 @@ broker_mt5.py      MetaTrader 5 execution: sizing, guards, orders (optional)
 state.py           Atomic JSON state, deduplication rules, pruning
 local_config.example.py  Optional hard-coded settings (copy to local_config.py)
 tracker.py         Follows sent signals to their stop or target, keeps the score
-webserver.py       FastAPI dashboard: live market state, positions, backtest
-dashboard.html     The dashboard page (no build step, no framework)
+webserver.py       FastAPI board API: market, context, account, positions, backtest
+dashboard.html     The board (no build step, no framework)
 backtest.py        Historical replay with fees, per-setup performance report
 preflight.py       --preflight self-check with actionable failure hints
-tests/             265 unit and pipeline tests (no network required)
+tests/             362 unit and pipeline tests (no network required)
 notebooks/         Colab quickstart notebook
 deploy/            systemd unit file
 .github/workflows/ CI (tests.yml) + free 15-minute scheduler (signals.yml)
@@ -912,7 +981,7 @@ Required function names, as specified: `fetch_ohlcv` (`exchange.py`),
 python -m unittest discover -s tests -v
 ```
 
-265 tests, no network needed. They cover indicator maths against hand-computed
+362 tests, no network needed. They cover indicator maths against hand-computed
 values, every setup's trigger *and* its non-trigger (a price riding the band
 must not re-fire), ATR levels and position sizing, confidence scoring, the
 deduplication and cooldown rules, atomic state persistence including corrupt
